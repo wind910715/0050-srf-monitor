@@ -10,6 +10,10 @@ on:
     - cron: '*/5 9-21 * * 1-5'
   workflow_dispatch: # 支援手動一鍵觸發測試
 
+env:
+  # 消除 GitHub Actions Node.js 20 棄用警告
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 concurrency:
   group: srf-qff-high-freq-monitor
   cancel-in-progress: false
@@ -26,10 +30,11 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-          cache: 'pip'
 
-      - name: Install Dependencies
-        run: pip install -r requirements.txt
+      - name: Install Dependencies Directly
+        run: |
+          python -m pip install --upgrade pip
+          pip install yfinance pandas numpy requests pytz
 
       - name: Run 35-Second High-Frequency Strategy Loop
         env:
