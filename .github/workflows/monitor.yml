@@ -1,0 +1,38 @@
+name: 0050 & TX & NQ Multi-Strategy Monitor
+
+on:
+  schedule:
+    # 台灣時間 (UTC+8) 每日早上 08:00 (UTC 00:00) 與下午 17:30 (UTC 09:30) 強制發送日/夜盤開盤戰情總結
+    - cron: '0 0 * * 1-5'
+    - cron: '30 9 * * 1-5'
+    # 台灣時間 日盤 (08:45 - 13:45) 每 5 分鐘即時偵測一次進出場訊號 (對應 UTC 00:45 - 05:45)
+    - cron: '*/5 0-5 * * 1-5'
+    # 台灣時間 夜盤上半場 (17:25 - 23:59) 每 5 分鐘即時偵測一次 (對應 UTC 09:25 - 15:59)
+    - cron: '*/5 9-15 * * 1-5'
+    # 台灣時間 夜盤下半場 (00:00 - 05:00) 每 5 分鐘即時偵測一次 (對應 UTC 16:00 - 21:00)
+    - cron: '*/5 16-21 * * 1-5'
+  workflow_dispatch: # 支援在 GitHub Actions 網頁手動一鍵觸發測試
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install Python Packages
+        run: pip install -r requirements.txt
+
+      - name: Execute Multi-Timeframe Strategy Monitor
+        env:
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+          # 手動點擊測試、早上 08:00 日盤開盤前、或下午 17:30 夜盤開盤時強制推播完整戰情面板；其餘每 5 分鐘僅在觸發進出場訊號時即時推播
+          FORCE_REPORT: ${{ github.event_name == 'workflow_dispatch' || github.event.schedule == '0 0 * * 1-5' || github.event.schedule == '30 9 * * 1-5' }}
+        run: python monitor_srf.py
