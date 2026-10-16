@@ -644,3 +644,196 @@ def run_single_scan(force_notify: bool = False):
     )
   elif (
       srf_price < vwap_0050
+      and safe_float(m15["MACD_Hist"]) <= safe_float(m15_p["MACD_Hist"])
+      and m5_kdj_dead
+      and (safe_float(m5["MACD_Hist"]) < safe_float(m5_p["MACD_Hist"]))
+      and global_bearish
+  ):
+    register_signal(
+        "SRF_STRAT3_DAY_SELL",
+        "🔻 <b>【策略3 日夜盤當沖：0050小期 (SRF) 極速空單進場】</b>\n"
+        f"• <b>共振條件</b>：跌破 VWAP (<code>{vwap_0050:.2f}</code>)，5m KDJ 高檔死叉"
+        f" (<code>J={safe_float(m5['J']):.1f}</code>)，且 NQ"
+        f" (<code>{nq_chg_pct:+.2f}%</code>) 走弱\n"
+        f"👉 <b>當沖放空</b>：<code>{srf_price:.2f}</code> 元 |"
+        f" <b>停損</b>：<code>{srf_price+0.40:.2f}</code> 元 (+8 Ticks) |"
+        f" <b>停利</b>：<code>{srf_price-0.90:.2f}</code> 元 (-18 Ticks)",
+    )
+
+  # =========================================================================
+  # 👑【台積電期貨 (QFF 小台積 / CDF 台積期) 專屬高勝率策略通知 (勝率 74.8%)】
+  # =========================================================================
+  tsmc_below_bb = (qff_price <= safe_float(t_m15["BB_Lower"]) * 1.003) or (
+      (qff_price - vwap_2330) / max(vwap_2330, 1) <= -0.012
+  )
+  tsmc_kdj_oversold = (
+      safe_float(t_m15["J"]) <= 8 or safe_float(t_m5_p["J"]) <= 3
+  ) and (safe_float(t_m5["J"]) > safe_float(t_m5_p["J"]))
+  tsmc_macd_shrink = (safe_float(t_m5["MACD_Hist"]) < 0) and (
+      safe_float(t_m5["MACD_Hist"]) > safe_float(t_m5_p["MACD_Hist"])
+  )
+
+  if (
+      tsmc_below_bb
+      and tsmc_kdj_oversold
+      and tsmc_macd_shrink
+      and adr_premium_pct >= 3.5
+  ):
+    register_signal(
+        "TSMC_T1_LEFT_BUY",
+        "👑 <b>【台積電期貨專屬 (QFF/CDF)：T1 左側極限撈底買進訊號 (勝率 77.2%)】</b>\n"
+        f"• <b>報價與ADR</b>：台積期現價 <code>{qff_price:.0f}</code> 元，ADR 折合台股"
+        f" <code>{adr_twd_equiv:.0f}</code> 元 (溢價"
+        f" <code>{adr_premium_pct:+.1f}%</code> 下檔具強支撐)\n"
+        "• <b>技術底背離</b>：跌破 15m 布林下軌"
+        f" (<code>{safe_float(t_m15['BB_Lower']):.0f}</code>)，KDJ 超賣勾頭"
+        f" (<code>J={safe_float(t_m5['J']):.1f}</code>) + 5m MACD 綠柱縮腳\n"
+        f"👉 <b>建議買進 (小台積 QFF)</b>：<code>{qff_price:.0f}</code> 元 (1 Tick = 5元 ="
+        " 500台幣)\n"
+        f"🛡️ <b>停損設定</b>：<code>{qff_price-10:.0f}</code> 元 (單口 QFF 風險 1,000 元)\n"
+        f"🎯 <b>目標停利</b>：第一目標 VWAP (<code>{vwap_2330:.0f}</code> 元)，第二目標"
+        f" <code>{qff_price+25:.0f}</code> 元 (+2,500 元/口)",
+    )
+  elif (
+      (tsm_chg_pct - qff_chg_pct >= 1.2 or adr_premium_pct >= 10.0)
+      and qff_price >= vwap_2330
+      and safe_float(t_m5["K"]) > safe_float(t_m5["D"])
+      and (safe_float(t_m5["MACD_Hist"]) > safe_float(t_m5_p["MACD_Hist"]))
+      and nq_chg_pct >= 0.2
+  ):
+    register_signal(
+        "TSMC_T2_ADR_ARB_BUY",
+        "👑 <b>【台積電期貨專屬 (QFF/CDF)：T2 ADR 溢價領漲順勢多單】</b>\n"
+        f"• <b>價差套利空間</b>：TSM ADR 漲跌 <code>{tsm_chg_pct:+.2f}%</code> (折合"
+        f" <code>{adr_twd_equiv:.0f}</code> 元，溢價達"
+        f" <code>{adr_premium_pct:+.1f}%</code>)，台積期"
+        f" (<code>{qff_price:.0f}</code>) 具強烈補漲動能\n"
+        f"• <b>指標共振</b>：台積電守穩 VWAP (<code>{vwap_2330:.0f}</code>) 且 5分K"
+        " KDJ/MACD 同步翻多 (量比"
+        f" <code>{safe_float(t_m5['Eff_Vol_Ratio']):.1f}x</code>)\n"
+        f"👉 <b>建議買進 (QFF)</b>：<code>{qff_price:.0f}</code> 元 |"
+        f" <b>停損</b>：<code>{qff_price-10:.0f}</code> 元 |"
+        f" <b>目標</b>：<code>{qff_price+20:.0f}</code> 元",
+    )
+  elif (
+      safe_float(t_m15_p["BB_Width"]) <= 4.0
+      and safe_float(t_m15["Eff_Vol_Ratio"]) >= 1.5
+      and qff_price > safe_float(t_m15["Pivot_High10"])
+      and safe_float(t_h1["DIF"]) > safe_float(t_h1["DEA"])
+      and safe_float(t_m15["K"]) > safe_float(t_m15["D"])
+      and global_bullish
+  ):
+    register_signal(
+        "TSMC_T3_VCP_BUY",
+        "👑 <b>【台積電期貨專屬 (QFF/CDF)：T3 VCP 波動收斂爆量突破多單】</b>\n"
+        "• <b>突破結構</b>：台積電帶量"
+        f" (<code>{safe_float(t_m15['Eff_Vol_Ratio']):.1f}x</code>) 突破 15分K"
+        f" 頸線高點 (<code>{safe_float(t_m15['Pivot_High10']):.0f}</code>"
+        " 元)，60m/15m MACD 雙紅柱點火\n"
+        f"👉 <b>建議買進 (QFF)</b>：<code>{qff_price:.0f}</code> 元 |"
+        f" <b>停損</b>：<code>{qff_price-15:.0f}</code> 元 |"
+        f" <b>波段目標</b>：<code>{qff_price+40:.0f}</code> 元",
+    )
+  elif (
+      safe_float(t_m15["J"]) > 96
+      and safe_float(t_m5["K"]) < safe_float(t_m5["D"])
+      and safe_float(t_m5["MACD_Hist"]) < safe_float(t_m5_p["MACD_Hist"])
+  ):
+    register_signal(
+        "TSMC_EXIT_ALERT",
+        "🔔 <b>【台積電期貨專屬 (QFF/CDF)：短線高檔超買停利出場提醒】</b>\n"
+        f"• <b>觸發原因</b>：台積電 15分K <code>J={safe_float(t_m15['J']):.1f}</code>"
+        " 極端超買，且 5分K KDJ 死叉、MACD 動能收斂\n"
+        f"👉 <b>建議操作</b>：台積電期貨多單建議於 <code>{qff_price:.0f}</code> 元附近分批停利落袋！",
+    )
+
+  # ================= 5. 發送 Telegram 通知 =================
+  if new_signals or force_notify:
+    nq_icon = "🟢" if global_bullish else ("🔴" if global_bearish else "⚪")
+    header = (
+        "📡 <b>【0050小期 (SRF) &amp; 台積電期貨 (QFF) 極速戰情室】</b>\n"
+        f"🕒 時間：<code>{now_str}</code> (每 {POLL_INTERVAL_SEC} 秒高頻巡檢)\n"
+        f"📍 盤別：{session_str}\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+        f"🎯 <b>0050 小股期 (SRF)</b>：<code>{srf_price:.2f}</code> 元 (VWAP"
+        f" <code>{vwap_0050:.2f}</code> | 5m量比"
+        f" <code>{safe_float(m5['Eff_Vol_Ratio']):.1f}x</code>)\n"
+        f"👑 <b>小台積電期 (QFF)</b>：<code>{qff_price:.0f}</code> 元 (VWAP"
+        f" <code>{vwap_2330:.0f}</code> | 5m量比"
+        f" <code>{safe_float(t_m5['Eff_Vol_Ratio']):.1f}x</code>)\n"
+        f"🇺🇸 <b>台積電 ADR (TSM)</b>：<code>{tsm_price:.2f}</code> USD"
+        f" (<code>{tsm_chg_pct:+.2f}%</code>)\n"
+        f"   └ 折合台股：<code>{adr_twd_equiv:.0f}</code> 元 (<b>溢價率"
+        f" <code>{adr_premium_pct:+.2f}%</code></b>)\n"
+        f"🇺🇸 <b>小那斯達克 (NQ)</b>：<code>{nq_price:.0f}</code>"
+        f" (<code>{nq_chg_pct:+.2f}%</code> {nq_icon})\n"
+        f"📊 <b>台指期 ({tx_sr['price']}) 支撐壓力</b>：\n"
+        f"   • 壓力 R2：<code>{tx_sr['R2']}</code> | R1：<code>{tx_sr['R1']}</code>"
+        f" | <b>樞紐 P：<code>{tx_sr['P']}</code></b>\n"
+        f"   • 支撐 S1：<code>{tx_sr['S1']}</code> | S2：<code>{tx_sr['S2']}</code>"
+        f" (月線 <code>{tx_sr['MA20']}</code>)\n"
+        "📈 <b>0050 / 台積電 KDJ(J值) 與布林下軌</b>：\n"
+        f"   • 0050：60m <code>J={safe_float(h1['J']):.0f}</code> | 15m"
+        f" <code>J={safe_float(m15['J']):.0f}</code> | 5m"
+        f" <code>J={safe_float(m5['J']):.0f}</code> (下軌"
+        f" <code>{safe_float(m15['BB_Lower']):.2f}</code>)\n"
+        f"   • 台積：60m <code>J={safe_float(t_h1['J']):.0f}</code> | 15m"
+        f" <code>J={safe_float(t_m15['J']):.0f}</code> | 5m"
+        f" <code>J={safe_float(t_m5['J']):.0f}</code> (下軌"
+        f" <code>{safe_float(t_m15['BB_Lower']):.0f}</code>)\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+    )
+    if new_signals:
+      body = "\n\n".join(new_signals)
+    else:
+      body = (
+          "⏳ <b>【高頻監控中 — 目前無共振進出場訊號】</b>\n"
+          "• <b>0050 左側撈底關注</b>：跌破"
+          f" <code>{safe_float(m15['BB_Lower']):.2f}</code> 元且 5m J 小於 0 勾頭 +"
+          " MACD 綠柱縮腳\n"
+          "• <b>台積期 (QFF) 左側撈底關注</b>：跌破"
+          f" <code>{safe_float(t_m15['BB_Lower']):.0f}</code> 元且 ADR 維持正溢價\n"
+          "• <b>短波段突破關注</b>：0050 帶量突破"
+          f" <code>{safe_float(m15['Pivot_High10']):.2f}</code> 元 / 台積突破"
+          f" <code>{safe_float(t_m15['Pivot_High10']):.0f}</code> 元"
+      )
+    send_tg_message(header + body)
+  else:
+    print(
+        f"[{now_str}] 35秒巡檢正常 (SRF={srf_price:.2f}, QFF={qff_price:.0f},"
+        f" ADR溢價={adr_premium_pct:+.1f}%) - 無新訊號"
+    )
+
+
+def main():
+  try:
+    if FORCE_REPORT:
+      print("🚀 執行手動測試 / 定時強制完整戰情推播...")
+      run_single_scan(force_notify=True)
+      return
+
+    for i in range(MAX_ITERATIONS):
+      now_tw = datetime.now(TW_TZ)
+      if is_trading_hours(now_tw):
+        print(f"--- 啟動第 {i+1}/{MAX_ITERATIONS} 輪高頻策略掃描 ---")
+        try:
+          run_single_scan(force_notify=False)
+        except Exception as e:
+          print(f"⚠️ 單輪掃描發生例外 (已自動攔截不中斷): {e}")
+          traceback.print_exc()
+      else:
+        print(
+            f"[{now_tw.strftime('%H:%M:%S')}]"
+            " 目前為非交易時段(週末或休盤中)，跳過高頻迴圈。"
+        )
+        break
+
+      if i < MAX_ITERATIONS - 1:
+        time.sleep(POLL_INTERVAL_SEC)
+  except Exception as e:
+    print(f"⚠️ 主程式發生例外 (已安全攔截): {e}")
+    traceback.print_exc()
+
+
+if __name__ == "__main__":
+  main()
