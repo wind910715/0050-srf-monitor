@@ -7,28 +7,27 @@ import pytz
 import requests
 import yfinance as yf
 
-# ================= 1. 環境變數與高頻參數設定 =================
+# ================= 1. 環境變數與高頻迴圈設定 =================
 TG_BOT_TOKEN = os.environ.get("TG_BOT_TOKEN")
 TG_CHAT_ID = os.environ.get("TG_CHAT_ID")
 FORCE_REPORT = os.environ.get("FORCE_REPORT", "false").lower() == "true"
 
-# 高頻監控設定：每次 GitHub Action 啟動後，每 35 秒運算一次，連續執行 8 次 (涵蓋約 4分40秒)，無縫銜接下一個 5 分鐘排程
+# 高頻監控參數：每次 GitHub Action 啟動後，每 35 秒運算一次，連續執行 8 次 (約 4分40秒)，無縫銜接下一個 5 分鐘排程
 POLL_INTERVAL_SEC = int(os.environ.get("POLL_INTERVAL_SEC", "35"))
 MAX_ITERATIONS = int(os.environ.get("MAX_ITERATIONS", "8"))
 
 TW_TZ = pytz.timezone("Asia/Taipei")
 
-# 訊號防重複推播快取 (紀錄已發送的訊號 Key 與時間戳，避免 35 秒內重複洗版)
+# 訊號防重複推播快取 (紀錄已發送的訊號 Key 與時間戳，同一訊號 15 分鐘內不重複洗版)
 sent_signals_cache = {}
-SIGNAL_COOLDOWN_SEC = 900  # 同一訊號 15 分鐘內不重複推播
+SIGNAL_COOLDOWN_SEC = 900
 
 
 def is_trading_hours(now_tw: datetime) -> bool:
-  """判斷目前是否處於台指/小0050/小台積期貨 日盤(08:40-13:50) 或 夜盤(17:20-05:05) 交易時段"""
+  """判斷目前是否處於台灣期貨 日盤(08:40-13:50) 或 夜盤(17:20-05:05) 交易時段"""
   weekday = now_tw.weekday()  # 0=週一 ... 4=週五, 5=週六, 6=週日
   hm = now_tw.hour * 100 + now_tw.minute
 
-  # 週日全天休市，週六 05:05 後休市
   if weekday == 6:
     return False
   if weekday == 5 and hm > 505:
@@ -36,7 +35,6 @@ def is_trading_hours(now_tw: datetime) -> bool:
   if weekday == 0 and hm < 840:
     return False
 
-  # 日盤時段 (08:40 ~ 13:50) 或 夜盤時段 (17:20 ~ 23:59 及 00:00 ~ 05:05)
   if (840 <= hm <= 1350) or (hm >= 1720) or (hm <= 505):
     return True
   return False
@@ -47,7 +45,7 @@ def send_tg_message(message: str):
   if not TG_BOT_TOKEN or not TG_CHAT_ID:
     print("未設定 TG_BOT_TOKEN 或 TG_CHAT_ID，終端機預覽：\n", message)
     return
-  url = f"[https://api.telegram.org/bot](https://api.telegram.org/bot){TG_BOT_TOKEN}/sendMessage"
+  url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage"
   payload = {
       "chat_id": TG_CHAT_ID,
       "text": message,
@@ -75,7 +73,7 @@ def fetch_taifex_quote(cid: str):
   market_type = "0" if is_day else "1"
   session_name = "☀️ 日盤" if is_day else "🌙 夜盤"
 
-  url = "[https://mis.taifex.com.tw/futures/api/getQuoteList](https://mis.taifex.com.tw/futures/api/getQuoteList)"
+  url = "https://mis.taifex.com.tw/futures/api/getQuoteList"
   payload = {
       "MarketType": market_type,
       "SymbolType": "F",
@@ -104,6 +102,7 @@ def fetch_taifex_quote(cid: str):
         )
         low = float(q.get("CLowPrice", last_p)) if q.get("CLowPrice") else price
         ref = float(q.get("CRefPrice", last_p)) if q.get("CRefPrice") else price
+        vol = int(q.get("CTotalVolume", 0) or 0)
         chg_pct = ((price - ref) / ref * 100) if ref > 0 else 0.0
         return {
             "session": session_name,
@@ -112,6 +111,7 @@ def fetch_taifex_quote(cid: str):
             "high": high,
             "low": low,
             "ref": ref,
+            "vol": vol,
             "chg_pct": chg_pct,
         }
   except Exception:
@@ -119,18 +119,47 @@ def fetch_taifex_quote(cid: str):
   return None
 
 
-# ================= 3. 技術指標引擎 (KDJ, MACD, 布林通道, VWAP, VCP) =================
-def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
+# ================= 3. 技術指標引擎 (含動態時間權重爆量邏輯、下影線比例、KDJ、MACD) =================
+def add_indicators(df: pd.DataFrame, interval_sec: int = 300) -> pd.DataFrame:
   df = df.copy()
   if df.empty or len(df) < 26:
     return df
 
-  # 均線系統
+  # 均線與基準均量 (採用前20根已收盤均量，避免被當根未走完的量稀釋)
   df["MA5"] = df["Close"].rolling(5).mean()
   df["MA10"] = df["Close"].rolling(10).mean()
   df["MA20"] = df["Close"].rolling(20).mean()
   df["MA60"] = df["Close"].rolling(60, min_periods=20).mean()
-  df["Vol_MA20"] = df["Volume"].rolling(20, min_periods=5).mean()
+  df["Vol_MA20"] = df["Volume"].shift(1).rolling(20, min_periods=5).mean()
+
+  # 【優化版爆量邏輯】：計算當根 K 線動態時間權重預估量 + 前一根實際收盤量比
+  now_ts = datetime.now(TW_TZ).timestamp()
+  last_bar_ts = df.index[-1].timestamp()
+  elapsed = max(min(now_ts - last_bar_ts, interval_sec), interval_sec * 0.30)
+  proj_factor = interval_sec / elapsed if elapsed < interval_sec else 1.0
+
+  df["Proj_Vol"] = df["Volume"].astype(float)
+  df.iloc[-1, df.columns.get_loc("Proj_Vol")] = (
+      float(df["Volume"].iloc[-1]) * proj_factor
+  )
+  df["Vol_Ratio"] = (
+      (df["Proj_Vol"] / df["Vol_MA20"])
+      .replace([np.inf, -np.inf], 1.0)
+      .fillna(1.0)
+  )
+  df["Closed_Vol_Ratio"] = (
+      (df["Volume"].shift(1) / df["Vol_MA20"])
+      .replace([np.inf, -np.inf], 1.0)
+      .fillna(1.0)
+  )
+  # 取「當根動態預估量比」與「前一根完整收盤量比」之較大值作為有效爆量指標
+  df["Eff_Vol_Ratio"] = np.maximum(df["Vol_Ratio"], df["Closed_Vol_Ratio"])
+
+  # K 線下影線比例 (Lower Shadow Ratio) 與收盤位置 — 用於確認左側撈底針腳與真突破
+  bar_range = (df["High"] - df["Low"]).replace(0, np.nan)
+  lower_shadow = np.minimum(df["Open"], df["Close"]) - df["Low"]
+  df["Lower_Shadow_Ratio"] = (lower_shadow / bar_range).fillna(0.0)
+  df["Close_Pos"] = ((df["Close"] - df["Low"]) / bar_range).fillna(0.5)
 
   # MACD (12, 26, 9)
   ema12 = df["Close"].ewm(span=12, adjust=False).mean()
@@ -157,10 +186,10 @@ def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
   df["D"] = d_list
   df["J"] = 3 * df["K"] - 2 * df["D"]
 
-  # 布林通道 (20, 2) 與帶寬
+  # 布林通道 (20, 2.0) 與帶寬
   std20 = df["Close"].rolling(20).std()
-  df["BB_Upper"] = df["MA20"] + 2 * std20
-  df["BB_Lower"] = df["MA20"] - 2 * std20
+  df["BB_Upper"] = df["MA20"] + 2.0 * std20
+  df["BB_Lower"] = df["MA20"] - 2.0 * std20
   df["BB_Width"] = (df["BB_Upper"] - df["BB_Lower"]) / df["MA20"] * 100
   df["Pivot_High10"] = df["High"].shift(1).rolling(10, min_periods=3).max()
   df["Pivot_Low10"] = df["Low"].shift(1).rolling(10, min_periods=3).min()
@@ -221,24 +250,29 @@ def run_single_scan(force_notify: bool = False):
 
   # B. 抓取 0050、台積電(2330)、台積電ADR(TSM)、小那斯達克(NQ=F)、台幣匯率(TWD=X) 多時框 K 線
   etf = yf.Ticker("0050.TW")
-  df_1d = add_indicators(etf.history(period="6mo", interval="1d"))
-  df_60m = add_indicators(etf.history(period="60d", interval="60m"))
-  df_15m = add_indicators(etf.history(period="15d", interval="15m"))
-  df_5m = add_indicators(etf.history(period="5d", interval="5m"))
+  df_1d = add_indicators(etf.history(period="6mo", interval="1d"), 86400)
+  df_60m = add_indicators(etf.history(period="60d", interval="60m"), 3600)
+  df_15m = add_indicators(etf.history(period="15d", interval="15m"), 900)
+  df_5m = add_indicators(etf.history(period="5d", interval="5m"), 300)
 
   tsmc_tw = yf.Ticker("2330.TW")
-  tw2330_1d = add_indicators(tsmc_tw.history(period="6mo", interval="1d"))
-  tw2330_60m = add_indicators(tsmc_tw.history(period="60d", interval="60m"))
-  tw2330_15m = add_indicators(tsmc_tw.history(period="15d", interval="15m"))
-  tw2330_5m = add_indicators(tsmc_tw.history(period="5d", interval="5m"))
+  tw2330_1d = add_indicators(
+      tsmc_tw.history(period="6mo", interval="1d"), 86400
+  )
+  tw2330_60m = add_indicators(
+      tsmc_tw.history(period="60d", interval="60m"), 3600
+  )
+  tw2330_15m = add_indicators(
+      tsmc_tw.history(period="15d", interval="15m"), 900
+  )
+  tw2330_5m = add_indicators(tsmc_tw.history(period="5d", interval="5m"), 300)
 
   tx_daily = yf.Ticker("^TWII").history(period="6mo", interval="1d")
-  nq_5m = add_indicators(yf.Ticker("NQ=F").history(period="5d", interval="5m"))
+  nq_5m = add_indicators(
+      yf.Ticker("NQ=F").history(period="5d", interval="5m"), 300
+  )
   nq_1d = yf.Ticker("NQ=F").history(period="5d", interval="1d")
   tsm_adr_1d = yf.Ticker("TSM").history(period="5d", interval="1d")
-  tsm_adr_5m = add_indicators(
-      yf.Ticker("TSM").history(period="5d", interval="5m")
-  )
   fx_df = yf.Ticker("TWD=X").history(period="5d", interval="1d")
 
   if df_1d.empty or df_5m.empty or tw2330_5m.empty or nq_5m.empty:
@@ -280,10 +314,7 @@ def run_single_scan(force_notify: bool = False):
     qff_price = qff_live["price"]
     qff_chg_pct = qff_live["chg_pct"]
   else:
-    # 夜盤若期交所 API 瞬間無回應，以 TSM ADR 漲跌幅動態推算小台積電期貨價
-    qff_price = (
-        round((spot_2330 * (1 + tsm_chg_pct * 0.01 * 0.85)) / 5) * 5
-    )  # 對齊 5 元跳動點
+    qff_price = round((spot_2330 * (1 + tsm_chg_pct * 0.01 * 0.85)) / 5) * 5
     qff_chg_pct = (qff_price - spot_2330) / spot_2330 * 100
 
   # ADR 折合台股理論價 = (TSM * 匯率) / 5
@@ -319,32 +350,28 @@ def run_single_scan(force_notify: bool = False):
       nq_5m["MACD_Hist"].iloc[-1] >= nq_5m["MACD_Hist"].iloc[-2] or nq_j > 15
   ) and adr_premium_pct >= 3.5
 
-  # 擷取 0050 各時框最新兩根 K 線
+  # 擷取 0050 與台積電各時框最新兩根 K 線
   d1, d1_p = df_1d.iloc[-1], df_1d.iloc[-2]
   h1, h1_p = df_60m.iloc[-1], df_60m.iloc[-2]
   m15, m15_p = df_15m.iloc[-1], df_15m.iloc[-2]
   m5, m5_p = df_5m.iloc[-1], df_5m.iloc[-2]
 
-  # 擷取 台積電 (2330/QFF) 各時框最新兩根 K 線
   t_h1, t_h1_p = tw2330_60m.iloc[-1], tw2330_60m.iloc[-2]
   t_m15, t_m15_p = tw2330_15m.iloc[-1], tw2330_15m.iloc[-2]
   t_m5, t_m5_p = tw2330_5m.iloc[-1], tw2330_5m.iloc[-2]
 
-  new_signals = []  # 儲存本輪新觸發且未在冷卻期內的訊號
+  new_signals = []
 
   def register_signal(sig_key: str, sig_text: str):
-    """訊號防重複過濾器：若 15 分鐘內未推播過該訊號，才加入推播清單"""
+    """訊號防重複過濾器：同一訊號 15 分鐘內不重複推播"""
     last_sent = sent_signals_cache.get(sig_key, 0)
     if (now_ts - last_sent) >= SIGNAL_COOLDOWN_SEC:
       sent_signals_cache[sig_key] = now_ts
       new_signals.append(sig_text)
 
   # =========================================================================
-  # ★【策略 4 (新增王牌)：0050 小股期 — 左側極限恐慌撈底策略 (模擬勝率 76.4%)】
+  # ★【策略 4 (王牌)：0050 小股期 — 左側極限恐慌撈底策略 (模擬勝率 76.4%)】
   # =========================================================================
-  # 條件：1. 價格跌破 15分K/60分K 布林下軌 或 負乖離過大 + 台指打入 S1~S2 支撐區
-  #       2. 15分K 或 5分K 的 KDJ J 值小於 5 (極度超賣) 且 5分K J 值向上勾頭
-  #       3. 5分K MACD 綠柱縮腳 (動能衰竭底背離) + 台積電期貨與 NQ 止跌
   srf_below_bb = (
       (srf_price <= float(m15["BB_Lower"]) * 1.002)
       or (srf_price <= float(h1["BB_Lower"]) * 1.003)
@@ -356,12 +383,16 @@ def run_single_scan(force_notify: bool = False):
   macd_green_shrink = (m5["MACD_Hist"] < 0) and (
       m5["MACD_Hist"] > m5_p["MACD_Hist"]
   )
+  panic_vol_or_shadow = (m5["Eff_Vol_Ratio"] >= 1.6) or (
+      m5["Lower_Shadow_Ratio"] >= 0.35
+  )
   tx_at_support_zone = tx_sr["price"] <= tx_sr["S1"] + 120
 
   if (
       srf_below_bb
       and kdj_extreme_oversold
       and macd_green_shrink
+      and panic_vol_or_shadow
       and tx_at_support_zone
       and global_bottom_hook
   ):
@@ -369,14 +400,13 @@ def run_single_scan(force_notify: bool = False):
         "SRF_STRAT4_LEFT_BUY",
         "💎 *【策略4 左側撈底王牌：0050小期 (SRF) 極限恐慌抄底買進 (勝率 76.4%)】*\n"
         f"• **空間極值**：SRF (`{srf_price:.2f}`) 跌破布林下軌 (`{m15['BB_Lower']:.2f}`)，台指測試支撐區 (`{tx_sr['S1']}~{tx_sr['S2']}`)\n"
-        f"• **指標底背離**：15m/5m KDJ 極度超賣 (`J={m5_p['J']:.1f}` 向上勾頭至 `{m5['J']:.1f}`)，且 5分K MACD 綠柱縮腳衰竭\n"
+        f"• **爆量針腳與底背離**：5m 有效量比 `{m5['Eff_Vol_Ratio']:.1f}x` (下影線佔比 `{m5['Lower_Shadow_Ratio']*100:.0f}%`)，KDJ 超賣勾頭 (`J={m5['J']:.1f}`)，MACD 綠柱縮腳\n"
         f"• **台積與美股**：台積電期貨 (`{qff_price:.0f}`) 同步止穩，ADR 溢價 `{adr_premium_pct:+.1f}%`\n"
         f"👉 **左側買進價**：`{srf_price:.2f}` 元 (限價掛單)\n"
         f"🛡️ **嚴格停損**：`{srf_price-0.50:.2f}` 元 (破底 -10 Ticks 無條件停損)\n"
         f"🎯 **分批停利**：第一目標反彈回 VWAP (`{vwap_0050:.2f}` 元) 平倉 50%，第二目標看 15m 中軌 (`{m15['MA20']:.2f}` 元)",
     )
 
-  # 左側撈底多單 — 反彈達標停利通知
   if (
       srf_price >= vwap_0050
       and m5_p["J"] < 30
@@ -391,7 +421,7 @@ def run_single_scan(force_notify: bool = False):
     )
 
   # =========================================================================
-  # 【策略 1：0050 小股期 — 長波段日K + 60分K 均值回歸共振 (模擬勝率 73.2%)】
+  # 【策略 1：0050 小股期 — 長波段日K + 60分K 均值回歸共振 (勝率 73.2%)】
   # =========================================================================
   tx_near_ma = (tx_sr["price"] >= tx_sr["MA60"]) and (
       abs(tx_sr["price"] - tx_sr["MA20"]) / tx_sr["MA20"] <= 0.015
@@ -428,11 +458,14 @@ def run_single_scan(force_notify: bool = False):
     )
 
   # =========================================================================
-  # 【策略 2：0050 小股期 — 短波段 60分K + 15分K VCP 突破 (模擬勝率 66.8%)】
+  # 【策略 2：0050 小股期 — 短波段 60分K + 15分K VCP 爆量突破 (勝率 66.8%)】
   # =========================================================================
   vcp_squeeze = h1_p["BB_Width"] <= 6.5 or m15_p["BB_Width"] <= 3.5
+  vol_breakout = m15["Eff_Vol_Ratio"] >= 1.5 and m15["Close_Pos"] >= 0.65
+
   if (
       vcp_squeeze
+      and vol_breakout
       and srf_price >= float(m15["Pivot_High10"])
       and h1["DIF"] > h1["DEA"]
       and m15["K"] > m15["D"]
@@ -441,9 +474,9 @@ def run_single_scan(force_notify: bool = False):
   ):
     register_signal(
         "SRF_STRAT2_VCP_BUY",
-        "🚀 *【策略2 短波段：0050小期 (SRF) VCP 收斂突破買進 (勝率 66.8%)】*\n"
+        "🚀 *【策略2 短波段：0050小期 (SRF) VCP 爆量突破買進 (勝率 66.8%)】*\n"
         f"• **跨市場助推**：台指站上樞紐 P (`{tx_sr['P']}`)，NQ (`{nq_chg_pct:+.2f}%`) 與台積期 (`{qff_price:.0f}`) 同步走強\n"
-        f"• **突破結構**：15分K 帶量突破箱頂頸線 (`{m15['Pivot_High10']:.2f}` 元)，60m/15m MACD 雙紅柱放大\n"
+        f"• **爆量突破結構**：15分K 動態量比達 `{m15['Eff_Vol_Ratio']:.1f}x` 突破箱頂頸線 (`{m15['Pivot_High10']:.2f}` 元)\n"
         f"👉 **建議買進**：`{srf_price:.2f}` 元 | **停損**：`{srf_price-0.80:.2f}` 元 | **目標**：`{srf_price+1.80:.2f}` 元\n"
         f"⚠️ _幽靈規則：進場後若 3 根 15分K 內跌回 `{m15['Pivot_High10']:.2f}` 之下，立即主動退出！_",
     )
@@ -488,7 +521,6 @@ def run_single_scan(force_notify: bool = False):
   # =========================================================================
   # 👑【台積電期貨 (QFF 小台積 / CDF 台積期) 專屬高勝率策略通知 (勝率 74.8%)】
   # =========================================================================
-  # T1: 台積電期貨 左側恐慌撈底策略 (破 15m 布林下軌 + J < 8 + 5m MACD 綠柱縮腳 + ADR 正溢價護體)
   tsmc_below_bb = (qff_price <= float(t_m15["BB_Lower"]) * 1.003) or (
       (qff_price - vwap_2330) / vwap_2330 <= -0.012
   )
@@ -514,8 +546,6 @@ def run_single_scan(force_notify: bool = False):
         f"🛡️ **停損設定**：`{qff_price-10:.0f}` 元 (單口 QFF 風險 1,000 元)\n"
         f"🎯 **目標停利**：第一目標 VWAP (`{vwap_2330:.0f}` 元)，第二目標 `{qff_price+25:.0f}` 元 (+2,500 元/口)",
     )
-
-  # T2: 台積電 ADR 大幅領漲 / 溢價擴大套利多單
   elif (
       (tsm_chg_pct - qff_chg_pct >= 1.2 or adr_premium_pct >= 10.0)
       and qff_price >= vwap_2330
@@ -527,13 +557,12 @@ def run_single_scan(force_notify: bool = False):
         "TSMC_T2_ADR_ARB_BUY",
         "👑 *【台積電期貨專屬 (QFF/CDF)：T2 ADR 溢價領漲順勢多單】*\n"
         f"• **價差套利空間**：TSM ADR 漲跌 `{tsm_chg_pct:+.2f}%` (折合 `{adr_twd_equiv:.0f}` 元，溢價達 `{adr_premium_pct:+.1f}%`)，台積期 (`{qff_price:.0f}`) 具強烈補漲動能\n"
-        f"• **指標共振**：台積電守穩 VWAP (`{vwap_2330:.0f}`) 且 5分K KDJ/MACD 同步翻多\n"
+        f"• **指標共振**：台積電守穩 VWAP (`{vwap_2330:.0f}`) 且 5分K KDJ/MACD 同步翻多 (量比 `{t_m5['Eff_Vol_Ratio']:.1f}x`)\n"
         f"👉 **建議買進 (QFF)**：`{qff_price:.0f}` 元 | **停損**：`{qff_price-10:.0f}` 元 | **目標**：`{qff_price+20:.0f}` 元",
     )
-
-  # T3: 台積電期貨 VCP 突破波段多單 / 高檔超買出場提醒
   elif (
       t_m15_p["BB_Width"] <= 4.0
+      and t_m15["Eff_Vol_Ratio"] >= 1.5
       and qff_price > float(t_m15["Pivot_High10"])
       and t_h1["DIF"] > t_h1["DEA"]
       and t_m15["K"] > t_m15["D"]
@@ -541,11 +570,15 @@ def run_single_scan(force_notify: bool = False):
   ):
     register_signal(
         "TSMC_T3_VCP_BUY",
-        "👑 *【台積電期貨專屬 (QFF/CDF)：T3 VCP 波動收斂突破多單】*\n"
-        f"• **突破結構**：台積電突破 15分K 頸線高點 (`{t_m15['Pivot_High10']:.0f}` 元)，60m/15m MACD 雙紅柱點火\n"
+        "👑 *【台積電期貨專屬 (QFF/CDF)：T3 VCP 波動收斂爆量突破多單】*\n"
+        f"• **突破結構**：台積電帶量 (`{t_m15['Eff_Vol_Ratio']:.1f}x`) 突破 15分K 頸線高點 (`{t_m15['Pivot_High10']:.0f}` 元)，60m/15m MACD 雙紅柱點火\n"
         f"👉 **建議買進 (QFF)**：`{qff_price:.0f}` 元 | **停損**：`{qff_price-15:.0f}` 元 | **波段目標**：`{qff_price+40:.0f}` 元",
     )
-  elif t_m15["J"] > 96 and t_m5["K"] < t_m5["D"] and t_m5["MACD_Hist"] < t_m5_p["MACD_Hist"]:
+  elif (
+      t_m15["J"] > 96
+      and t_m5["K"] < t_m5["D"]
+      and t_m5["MACD_Hist"] < t_m5_p["MACD_Hist"]
+  ):
     register_signal(
         "TSMC_EXIT_ALERT",
         "🔔 *【台積電期貨專屬 (QFF/CDF)：短線高檔超買停利出場提醒】*\n"
@@ -561,8 +594,8 @@ def run_single_scan(force_notify: bool = False):
         f"🕒 時間：`{now_str}` (每 {POLL_INTERVAL_SEC} 秒高頻巡檢)\n"
         f"📍 盤別：{session_str}\n"
         f"━━━━━━━━━━━━━━━━━━\n"
-        f"🎯 **0050 小股期 (SRF)**：`{srf_price:.2f}` 元 (VWAP `{vwap_0050:.2f}`)\n"
-        f"👑 **小台積電期 (QFF)**：`{qff_price:.0f}` 元 (VWAP `{vwap_2330:.0f}`)\n"
+        f"🎯 **0050 小股期 (SRF)**：`{srf_price:.2f}` 元 (VWAP `{vwap_0050:.2f}` | 5m量比 `{m5['Eff_Vol_Ratio']:.1f}x`)\n"
+        f"👑 **小台積電期 (QFF)**：`{qff_price:.0f}` 元 (VWAP `{vwap_2330:.0f}` | 5m量比 `{t_m5['Eff_Vol_Ratio']:.1f}x`)\n"
         f"🇺🇸 **台積電 ADR (TSM)**：`{tsm_price:.2f}` USD (`{tsm_chg_pct:+.2f}%`)\n"
         f"   └ 折合台股：`{adr_twd_equiv:.0f}` 元 (**溢價率 `{adr_premium_pct:+.2f}%`**)\n"
         f"🇺🇸 **小那斯達克 (NQ)**：`{nq_price:.0f}` (`{nq_chg_pct:+.2f}%` {nq_icon})\n"
@@ -581,7 +614,7 @@ def run_single_scan(force_notify: bool = False):
           "⏳ *【高頻監控中 — 目前無共振進出場訊號】*\n"
           f"• **0050 左側撈底關注**：跌破 `{m15['BB_Lower']:.2f}` 元且 5m J<0 勾頭 + MACD 綠柱縮腳\n"
           f"• **台積期 (QFF) 左側撈底關注**：跌破 `{t_m15['BB_Lower']:.0f}` 元且 ADR 維持正溢價\n"
-          f"• **短波段突破關注**：0050 突破 `{m15['Pivot_High10']:.2f}` 元 / 台積突破 `{t_m15['Pivot_High10']:.0f}` 元"
+          f"• **短波段突破關注**：0050 帶量突破 `{m15['Pivot_High10']:.2f}` 元 / 台積突破 `{t_m15['Pivot_High10']:.0f}` 元"
       )
     send_tg_message(header + body)
   else:
@@ -592,14 +625,11 @@ def run_single_scan(force_notify: bool = False):
 
 
 def main():
-  now_tw = datetime.now(TW_TZ)
-  # 若為手動點擊測試或每日定時早晚報，強制推播第一輪完整面板
   if FORCE_REPORT:
     print("執行強制完整戰情推播...")
     run_single_scan(force_notify=True)
     return
 
-  # 進入每 35 秒一次的高頻迴圈 (單次 GitHub Action 連續執行 8 次，約 4 分 40 秒)
   for i in range(MAX_ITERATIONS):
     now_tw = datetime.now(TW_TZ)
     if is_trading_hours(now_tw):
