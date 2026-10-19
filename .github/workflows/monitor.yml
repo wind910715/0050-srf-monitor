@@ -2,18 +2,24 @@ name: 0050 & TSMC Futures Pro-Max Monitor
 
 on:
   schedule:
-    # 台灣時間 每日 08:00 (UTC 00:00) 與 17:30 (UTC 09:30) 強制發送日盤/夜盤完整戰情早晚報
+    # 台灣時間 每日 08:00 (UTC 00:00) 與 17:30 (UTC 09:30) 發送連線與即時報價確認
     - cron: '0 0 * * 1-5'
     - cron: '30 9 * * 1-5'
-    # 台灣時間 日盤與夜盤交易時段：每 5 分鐘啟動一次容器，容器內每 35 秒自動迴圈運算 8 次
+    # 台灣時間 週一至週五 日夜盤交易時段：每 5 分鐘啟動，內部每 35 秒零延遲巡檢
     - cron: '*/5 0-5 * * 1-5'
     - cron: '*/5 9-21 * * 1-5'
+    # ★新增：每週六早上 09:00 (台灣時間，對應 UTC 週六 01:00) 自動執行策略回測報告並推播至 TG
+    - cron: '0 1 * * 6'
   workflow_dispatch:
+    inputs:
+      run_backtest:
+        description: '是否同時執行【每週六回測勝率報告】？(輸入 true 或 false)'
+        required: false
+        default: 'false'
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
-# 賦予自動保存 state.json (跨容器防洗版與虛擬持倉記憶) 的讀寫權限
 permissions:
   contents: write
 
@@ -36,12 +42,20 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Install Dependencies Directly
+      - name: Install Dependencies
         run: |
           python -m pip install --upgrade pip
           pip install yfinance pandas numpy requests pytz
 
-      - name: Run 35-Second Pro-Max Strategy Engine
+      - name: Run Weekly Backtest (Every Saturday 09:00 TW or Manual Trigger)
+        if: github.event.schedule == '0 1 * * 6' || github.event.inputs.run_backtest == 'true'
+        env:
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+        run: python weekly_backtest.py
+
+      - name: Run 35-Second Realtime Strategy Engine
+        if: github.event.schedule != '0 1 * * 6'
         env:
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
@@ -50,14 +64,15 @@ jobs:
           FORCE_REPORT: ${{ github.event_name == 'workflow_dispatch' || github.event.schedule == '0 0 * * 1-5' || github.event.schedule == '30 9 * * 1-5' }}
         run: python monitor_srf.py
 
-      - name: Persist Position & Signal State Across Containers
+      - name: Persist Position & Signal State
+        if: github.event.schedule != '0 1 * * 6'
         run: |
           if [ -f state.json ]; then
             git config user.name "github-actions[bot]"
             git config user.email "github-actions[bot]@users.noreply.github.com"
             git add state.json
             if ! git diff --cached --quiet; then
-              git commit -m "chore: update bot position & signal state [skip ci]"
+              git commit -m "chore: update bot state [skip ci]"
               git pull --rebase origin ${{ github.ref_name }} || true
               git push origin ${{ github.ref_name }} || true
             fi
