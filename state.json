@@ -1,15 +1,14 @@
 {
   "sent_signals": {
-    "SRF_STRAT4_LEFT_BUY": 1792374794.8993475,
-    "SRF_STRAT1_LONG_BUY": 1792381345.0590425
+    "SRF_STRAT1_LONG_BUY": 1792383333.4748826
   },
   "positions": {
     "SRF": {
       "dir": "LONG",
-      "entry": 106.6,
-      "sl": 105.6,
-      "tp": 109.1,
-      "ts": 1792381345.0590425,
+      "entry": 106.95,
+      "sl": 105.95,
+      "tp": 109.45,
+      "ts": 1792383333.4748826,
       "strategy": "策略1長波段"
     },
     "QFF": null
