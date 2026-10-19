@@ -1,6 +1,7 @@
 {
   "sent_signals": {
-    "SRF_STRAT1_LONG_BUY": 1792383333.4748826
+    "SRF_STRAT1_LONG_BUY": 1792383333.4748826,
+    "QFF_T2_BUY": 1792385324.9550374
   },
   "positions": {
     "SRF": {
@@ -12,6 +13,16 @@
       "strategy": "策略1長波段",
       "phantom_warned": true
     },
-    "QFF": null
+    "QFF": {
+      "dir": "BUY",
+      "entry": 2405.0,
+      "sl": 2395,
+      "tp1": 2420,
+      "tp2": 2430,
+      "ts": 1792385324.9550374,
+      "strategy": "台積T2 — 當沖守穩 VWAP 順勢多",
+      "tp1_hit": false,
+      "phantom_warned": false
+    }
   }
 }
