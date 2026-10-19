@@ -9,7 +9,8 @@
       "sl": 105.95,
       "tp": 109.45,
       "ts": 1792383333.4748826,
-      "strategy": "策略1長波段"
+      "strategy": "策略1長波段",
+      "phantom_warned": true
     },
     "QFF": null
   }
