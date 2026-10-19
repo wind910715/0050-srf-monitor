@@ -9,7 +9,8 @@
       "sl": 106.0,
       "tp": 107.2,
       "ts": 1792374794.8993475,
-      "strategy": "策略4左側撈底"
+      "strategy": "策略4左側撈底",
+      "phantom_notified": true
     },
     "QFF": null
   }
