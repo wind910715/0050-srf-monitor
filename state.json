@@ -16,12 +16,12 @@
     "QFF": {
       "dir": "BUY",
       "entry": 2405.0,
-      "sl": 2395,
+      "sl": 2405.0,
       "tp1": 2420,
       "tp2": 2430,
       "ts": 1792385324.9550374,
       "strategy": "台積T2 — 當沖守穩 VWAP 順勢多",
-      "tp1_hit": false,
+      "tp1_hit": true,
       "phantom_warned": false
     }
   }
