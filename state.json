@@ -1,30 +1,20 @@
 {
   "sent_signals": {
     "QFF_T1_BUY": 1792471685.0439074,
-    "SRF_S4_BUY": 1792473263.651673
+    "SRF_S4_BUY": 1792475082.9209569
   },
   "positions": {
     "SRF": {
       "dir": "BUY",
-      "entry": 107.4,
-      "sl": 106.95,
-      "tp1": 108.05,
-      "tp2": 108.7,
-      "ts": 1792473263.651673,
+      "entry": 107.2,
+      "sl": 106.75,
+      "tp1": 107.85,
+      "tp2": 108.5,
+      "ts": 1792475082.9209569,
       "strategy": "策略4 — 左側極限恐慌撈底",
       "tp1_hit": false,
       "phantom_warned": false
     },
-    "QFF": {
-      "dir": "BUY",
-      "entry": 2405.0,
-      "sl": 2395,
-      "tp1": 2420,
-      "tp2": 2435,
-      "ts": 1792471685.0439074,
-      "strategy": "台積T1 — 左側極限恐慌撈底",
-      "tp1_hit": false,
-      "phantom_warned": true
-    }
+    "QFF": null
   }
 }
