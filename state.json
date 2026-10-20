@@ -1,6 +1,6 @@
 {
   "sent_signals": {
-    "SRF_S4_BUY": 1792520046.626061
+    "SRF_S4_BUY": 1792522070.793368
   },
   "positions": {
     "SRF": {
@@ -9,7 +9,7 @@
       "sl": 106.8,
       "tp1": 107.9,
       "tp2": 108.55,
-      "ts": 1792520046.626061,
+      "ts": 1792522070.793368,
       "strategy": "策略4 — 左側極限恐慌撈底",
       "tp1_hit": false,
       "phantom_warned": false
