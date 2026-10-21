@@ -1,0 +1,15 @@
+{
+  "sent_signals": {},
+  "positions": {
+    "SRF": null,
+    "QFF": null
+  },
+  "night_bars": {
+    "SRF": [],
+    "QFF": [],
+    "TXF": []
+  },
+  "last_prices": {
+    "TXF": 46975.0
+  }
+}
