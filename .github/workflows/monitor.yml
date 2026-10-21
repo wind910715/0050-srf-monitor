@@ -2,13 +2,14 @@ name: 0050 & TSMC Futures Pro-Max Monitor
 
 on:
   schedule:
-    # 台灣時間 每日 08:00 (UTC 00:00) 與 17:30 (UTC 09:30) 發送連線與即時報價確認
-    - cron: '0 0 * * 1-5'
-    - cron: '30 9 * * 1-5'
-    # 台灣時間 週一至週五 日夜盤交易時段：每 5 分鐘啟動，內部每 35 秒零延遲巡檢
+    # 台灣時間 每日 08:15 (早盤提早30分鐘開機待命，對應 UTC 00:15) 與 14:30 (夜盤提早30分鐘開機待命，對應 UTC 06:30) 自動發送開機報價確認卡
+    - cron: '15 0 * * 1-5'
+    - cron: '30 6 * * 1-5'
+    # 台灣時間 早盤時段 (08:00 ~ 13:55，涵蓋 08:15 開機待命與 08:45-13:45 正式交易，對應 UTC 00:00 ~ 05:55)
     - cron: '*/5 0-5 * * 1-5'
-    - cron: '*/5 9-21 * * 1-5'
-    # ★新增：每週六早上 09:00 (台灣時間，對應 UTC 週六 01:00) 自動執行策略回測報告並推播至 TG
+    # 台灣時間 夜盤時段 (14:00 ~ 次日 05:55，涵蓋 14:30 開機待命與 15:00-05:00 正式交易，對應 UTC 06:00 ~ 21:55)
+    - cron: '*/5 6-21 * * 1-5'
+    # 每週六早上 09:00 (台灣時間，對應 UTC 週六 01:00) 自動執行策略回測報告
     - cron: '0 1 * * 6'
   workflow_dispatch:
     inputs:
@@ -54,14 +55,14 @@ jobs:
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
         run: python weekly_backtest.py
 
-      - name: Run 35-Second Realtime Strategy Engine
+      - name: Run 30-Second Realtime Strategy Engine
         if: github.event.schedule != '0 1 * * 6'
         env:
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
-          POLL_INTERVAL_SEC: '35'
-          MAX_ITERATIONS: '8'
-          FORCE_REPORT: ${{ github.event_name == 'workflow_dispatch' || github.event.schedule == '0 0 * * 1-5' || github.event.schedule == '30 9 * * 1-5' }}
+          POLL_INTERVAL_SEC: '30'
+          MAX_ITERATIONS: '9'
+          FORCE_REPORT: ${{ github.event_name == 'workflow_dispatch' || github.event.schedule == '15 0 * * 1-5' || github.event.schedule == '30 6 * * 1-5' }}
         run: python monitor_srf.py
 
       - name: Persist Position & Signal State
