@@ -255,6 +255,10 @@
       {
         "ts": 1792571000.9367561,
         "p": 108.45
+      },
+      {
+        "ts": 1792571323.5292437,
+        "p": 108.5
       }
     ],
     "QFF": [
@@ -489,6 +493,10 @@
       {
         "ts": 1792571000.9367561,
         "p": 2417.0
+      },
+      {
+        "ts": 1792571323.5292437,
+        "p": 2418.0
       }
     ],
     "TXF": []
@@ -516,5 +524,58 @@
     "SRF": 107.9000015258789,
     "QFF": 2405.0,
     "TXF": 46652.0
-  }
+  },
+  "active_contract_ym": "202611",
+  "strategy_stats": {
+    "SRF_S4_BUY": {
+      "wr": 68.0,
+      "rr": 1.9,
+      "j_param": 15,
+      "ev": -0.113,
+      "enabled": true
+    },
+    "SRF_S1_BUY": {
+      "wr": 75.0,
+      "rr": 2.3,
+      "j_param": 45,
+      "enabled": true
+    },
+    "SRF_S2_BUY": {
+      "wr": 100.0,
+      "rr": 1.8,
+      "j_param": 80,
+      "enabled": true
+    },
+    "SRF_S3_BUY": {
+      "wr": 100.0,
+      "rr": 1.8,
+      "j_param": 65,
+      "enabled": true
+    },
+    "SRF_S3_SELL": {
+      "wr": 40.0,
+      "rr": 2.25,
+      "j_param": 42,
+      "enabled": false
+    },
+    "QFF_T1_BUY": {
+      "wr": 76.0,
+      "rr": 2.5,
+      "j_param": 22,
+      "enabled": true
+    },
+    "QFF_T2_BUY": {
+      "wr": 68.0,
+      "rr": 1.9,
+      "j_param": 65,
+      "enabled": true
+    },
+    "QFF_T2_SELL": {
+      "wr": 37.5,
+      "rr": 1.8,
+      "j_param": 45,
+      "enabled": false
+    }
+  },
+  "last_backtest_ts": 1792571326.9123812
 }
