@@ -2218,8 +2218,8 @@
     }
   },
   "day_close_anchor": {
-    "SRF": 107.9000015258789,
-    "QFF": 2405.0,
+    "SRF": 108.7,
+    "QFF": 2431.0,
     "TXF": 46652.0
   },
   "active_contract_ym": "202611",
@@ -2276,141 +2276,141 @@
   },
   "last_backtest_ts": 1792571326.9123812,
   "optimized_params": {
-    "updated_at": "2026-10-21 22:59",
+    "updated_at": "2026-10-22 07:29",
     "SRF_S4": {
       "algo_id": "CONNORS_RSI2_BUY",
       "algo_label": "Connors RSI(2)極限回歸",
       "total": 54,
-      "wins": 38,
-      "win_rate": 70.4,
-      "rr": 0.69,
-      "net_pts": 9.99,
-      "score": 449.7019644404586,
-      "enabled": true,
+      "wins": 22,
+      "win_rate": 40.7,
+      "rr": 2.58,
+      "net_pts": 11.42,
+      "score": 713.0360346639011,
+      "enabled": false,
       "params": {
         "param_val": 18,
-        "sl_atr": 2.0,
-        "tp1_atr": 1.1,
-        "tp2_atr": 2.6
+        "sl_atr": 1.1,
+        "tp1_atr": 1.8,
+        "tp2_atr": 4.2
       }
     },
     "SRF_S1": {
-      "algo_id": "TREND_MA20_KDJ_PULLBACK",
-      "algo_label": "多頭月線回踩金叉",
-      "total": 8,
-      "wins": 7,
-      "win_rate": 87.5,
-      "rr": 1.08,
-      "net_pts": 3.62,
-      "score": 568.2786717374823,
-      "enabled": true,
+      "algo_id": "INST_VWAP_PULLBACK",
+      "algo_label": "外資VWAP籌碼首回測",
+      "total": 39,
+      "wins": 16,
+      "win_rate": 41.0,
+      "rr": 2.94,
+      "net_pts": 10.73,
+      "score": 769.4852659845392,
+      "enabled": false,
       "params": {
-        "param_val": 42,
-        "sl_atr": 2.0,
-        "tp1_atr": 1.1,
-        "tp2_atr": 2.6
+        "param_val": 48,
+        "sl_atr": 1.1,
+        "tp1_atr": 1.8,
+        "tp2_atr": 4.2
       }
     },
     "SRF_S2": {
-      "algo_id": "CLASSIC_PIVOT_BREAK",
-      "algo_label": "經典箱頂突破",
+      "algo_id": "MINERVINI_VCP_POCKET",
+      "algo_label": "Minervini VCP口袋支點",
       "total": 10,
-      "wins": 6,
-      "win_rate": 60.0,
-      "rr": 1.32,
-      "net_pts": 2.8,
-      "score": 1878.08961541702,
+      "wins": 7,
+      "win_rate": 70.0,
+      "rr": 3.27,
+      "net_pts": 8.54,
+      "score": 8359.197707520234,
       "enabled": true,
       "params": {
-        "param_val": 82,
-        "sl_atr": 2.0,
-        "tp1_atr": 1.3,
-        "tp2_atr": 3.2
+        "param_val": 72,
+        "sl_atr": 1.1,
+        "tp1_atr": 1.8,
+        "tp2_atr": 4.2
       }
     },
     "SRF_S3": {
       "algo_id": "CHIP_MOMENTUM_BUY",
       "algo_label": "日夜盤籌碼順勢多",
-      "total": 12,
-      "wins": 11,
-      "win_rate": 91.7,
-      "rr": 1.15,
-      "net_pts": 8.12,
-      "score": 595.8225201307902,
-      "enabled": true,
+      "total": 20,
+      "wins": 7,
+      "win_rate": 35.0,
+      "rr": 3.53,
+      "net_pts": 4.77,
+      "score": 809.260430850271,
+      "enabled": false,
       "params": {
-        "param_val": 60,
-        "sl_atr": 2.0,
-        "tp1_atr": 1.3,
-        "tp2_atr": 3.2
+        "param_val": 70,
+        "sl_atr": 1.1,
+        "tp1_atr": 1.8,
+        "tp2_atr": 4.2
       }
     },
     "SRF_HEDGE": {
       "algo_id": "HYBRID_EXHAUST_HEDGE",
       "algo_label": "極限乖離衰竭+破籌碼對鎖",
       "total": 36,
-      "wins": 26,
-      "win_rate": 72.2,
-      "rr": 0.61,
-      "net_pts": 5.77,
-      "score": 457.9313780416909,
+      "wins": 22,
+      "win_rate": 61.1,
+      "rr": 2.08,
+      "net_pts": 15.07,
+      "score": 801.0723193150654,
       "enabled": true,
       "params": {
         "param_val": 92,
-        "sl_atr": 2.0,
-        "tp1_atr": 0.9,
-        "tp2_atr": 2.2
+        "sl_atr": 1.4,
+        "tp1_atr": 1.5,
+        "tp2_atr": 3.4
       }
     },
     "QFF_T1": {
       "algo_id": "CONNORS_RSI2_BUY",
       "algo_label": "Connors RSI(2)極限回歸",
-      "total": 47,
-      "wins": 36,
-      "win_rate": 76.6,
-      "rr": 0.49,
-      "net_pts": 154.65,
-      "score": 479.1200485633264,
-      "enabled": true,
+      "total": 46,
+      "wins": 21,
+      "win_rate": 45.7,
+      "rr": 2.46,
+      "net_pts": 306.36,
+      "score": 734.3154949430996,
+      "enabled": false,
       "params": {
         "param_val": 25,
-        "sl_atr": 2.0,
-        "tp1_atr": 0.9,
-        "tp2_atr": 2.2
+        "sl_atr": 1.1,
+        "tp1_atr": 1.8,
+        "tp2_atr": 4.2
       }
     },
     "QFF_T2": {
       "algo_id": "INST_VWAP_PULLBACK",
       "algo_label": "外資VWAP籌碼首回測",
-      "total": 25,
-      "wins": 20,
-      "win_rate": 80.0,
-      "rr": 0.61,
-      "net_pts": 149.55,
-      "score": 504.57466133905075,
-      "enabled": true,
+      "total": 23,
+      "wins": 13,
+      "win_rate": 56.5,
+      "rr": 2.81,
+      "net_pts": 302.01,
+      "score": 873.5412066652616,
+      "enabled": false,
       "params": {
         "param_val": 48,
-        "sl_atr": 2.0,
-        "tp1_atr": 0.9,
-        "tp2_atr": 2.2
+        "sl_atr": 1.1,
+        "tp1_atr": 1.8,
+        "tp2_atr": 4.2
       }
     },
     "QFF_HEDGE": {
       "algo_id": "HYBRID_EXHAUST_HEDGE",
       "algo_label": "極限乖離衰竭+破籌碼對鎖",
       "total": 51,
-      "wins": 37,
-      "win_rate": 72.5,
-      "rr": 0.41,
-      "net_pts": 26.67,
-      "score": 451.5805511733845,
-      "enabled": true,
+      "wins": 20,
+      "win_rate": 39.2,
+      "rr": 2.34,
+      "net_pts": 189.98,
+      "score": 664.034374400492,
+      "enabled": false,
       "params": {
         "param_val": 82,
-        "sl_atr": 2.0,
-        "tp1_atr": 0.9,
-        "tp2_atr": 2.2
+        "sl_atr": 1.8,
+        "tp1_atr": 1.2,
+        "tp2_atr": 2.8
       }
     }
   }
