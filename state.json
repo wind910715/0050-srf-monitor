@@ -11,5 +11,29 @@
   },
   "last_prices": {
     "TXF": 46975.0
+  },
+  "intraday_bars": {
+    "SRF": [],
+    "QFF": [],
+    "TXF": []
+  },
+  "last_valid_quotes": {
+    "TXF": {
+      "symbol": "TMFJ6-M",
+      "name": "微臺指期106",
+      "price": 46962.0,
+      "last": 46962.0,
+      "bid": 46960.0,
+      "ask": 46962.0,
+      "high": 47096.0,
+      "low": 46134.0,
+      "ref": 46341.0,
+      "chg_pct": 1.3400660322392697,
+      "vol": 169063,
+      "time": "045959",
+      "market_type": "1",
+      "source": "期交所MIS(夜盤)",
+      "priority": 1269063
+    }
   }
 }
