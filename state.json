@@ -1,5 +1,7 @@
 {
-  "sent_signals": {},
+  "sent_signals": {
+    "QFF_T2_BUY": 1792576051.0523686
+  },
   "positions": {
     "SRF": {
       "dir": "BUY",
@@ -12,7 +14,16 @@
       "tp1_hit": false,
       "phantom_warned": true
     },
-    "QFF": null
+    "QFF": {
+      "dir": "BUY",
+      "entry": 2416.0,
+      "sl": 2376.0,
+      "tp1": 2446.0,
+      "tp2": 2481.0,
+      "ts": 1792576051.0523686,
+      "strategy": "台積T2 — 五日籌碼重心站回順勢多",
+      "tp1_hit": false
+    }
   },
   "night_bars": {
     "SRF": [],
@@ -327,6 +338,10 @@
       {
         "ts": 1792574819.7594087,
         "p": 108.3
+      },
+      {
+        "ts": 1792576051.0523686,
+        "p": 108.4
       }
     ],
     "QFF": [
@@ -633,6 +648,10 @@
       {
         "ts": 1792574819.7594087,
         "p": 2414.0
+      },
+      {
+        "ts": 1792576051.0523686,
+        "p": 2416.0
       }
     ],
     "TXF": [
@@ -671,6 +690,10 @@
       {
         "ts": 1792574819.7594087,
         "p": 47183.0
+      },
+      {
+        "ts": 1792576051.0523686,
+        "p": 47228.0
       }
     ]
   },
@@ -752,117 +775,117 @@
   },
   "last_backtest_ts": 1792571326.9123812,
   "optimized_params": {
-    "updated_at": "2026-10-21 17:01",
+    "updated_at": "2026-10-21 17:46",
     "SRF_S4": {
-      "total": 30,
-      "wins": 16,
-      "win_rate": 53.3,
-      "rr": 1.07,
-      "net_pts": 1.73,
-      "score": 3.1111076811291105,
+      "total": 37,
+      "wins": 14,
+      "win_rate": 37.8,
+      "rr": 1.33,
+      "net_pts": -2.97,
+      "score": -0.5329742089778795,
       "params": {
-        "j_thresh": 22,
-        "sl_atr": 1.6,
-        "tp1_atr": 1.5,
-        "tp2_atr": 3.2
+        "j_thresh": 48,
+        "sl_atr": 2.2,
+        "tp1_atr": 1.1,
+        "tp2_atr": 2.8
       }
     },
     "SRF_S1": {
-      "total": 4,
-      "wins": 2,
-      "win_rate": 50.0,
-      "rr": 0.54,
-      "net_pts": -0.65,
-      "score": 0.538047750909322,
+      "total": 5,
+      "wins": 1,
+      "win_rate": 20.0,
+      "rr": 11.52,
+      "net_pts": 1.5,
+      "score": 3.7554908697505023,
       "params": {
-        "j_thresh": 55,
-        "sl_atr": 2.0,
-        "tp1_atr": 1.1,
-        "tp2_atr": 2.4
+        "j_thresh": 45,
+        "sl_atr": 2.2,
+        "tp1_atr": 1.6,
+        "tp2_atr": 4.2
       }
     },
     "SRF_S2": {
-      "total": 12,
-      "wins": 5,
-      "win_rate": 41.7,
-      "rr": 1.92,
-      "net_pts": 1.02,
-      "score": 2.7684205834114644,
+      "total": 11,
+      "wins": 4,
+      "win_rate": 36.4,
+      "rr": 4.32,
+      "net_pts": 3.0,
+      "score": 2.105334595229211,
       "params": {
-        "j_thresh": 88,
-        "sl_atr": 1.6,
-        "tp1_atr": 1.5,
-        "tp2_atr": 3.2
+        "j_thresh": 92,
+        "sl_atr": 2.2,
+        "tp1_atr": 1.6,
+        "tp2_atr": 4.2
       }
     },
     "SRF_S3": {
-      "total": 27,
-      "wins": 14,
-      "win_rate": 51.9,
-      "rr": 1.44,
-      "net_pts": 3.78,
-      "score": 3.8711496581688216,
+      "total": 11,
+      "wins": 6,
+      "win_rate": 54.5,
+      "rr": 6.16,
+      "net_pts": 9.94,
+      "score": 4.8355764676324995,
       "params": {
-        "j_thresh": 65,
-        "sl_atr": 1.3,
-        "tp1_atr": 1.5,
-        "tp2_atr": 3.2
+        "j_thresh": 78,
+        "sl_atr": 2.2,
+        "tp1_atr": 1.6,
+        "tp2_atr": 4.2
       }
     },
     "SRF_HEDGE": {
-      "total": 13,
-      "wins": 8,
-      "win_rate": 61.5,
-      "rr": 1.33,
-      "net_pts": 2.98,
-      "score": 2.9619376016172567,
+      "total": 12,
+      "wins": 4,
+      "win_rate": 33.3,
+      "rr": 2.71,
+      "net_pts": 1.36,
+      "score": 1.102191149834236,
       "params": {
-        "j_thresh": 60,
-        "sl_atr": 1.3,
-        "tp1_atr": 1.5,
-        "tp2_atr": 3.2
+        "j_thresh": 78,
+        "sl_atr": 2.8,
+        "tp1_atr": 1.6,
+        "tp2_atr": 4.2
       }
     },
     "QFF_T1": {
-      "total": 34,
-      "wins": 15,
-      "win_rate": 44.1,
-      "rr": 1.28,
-      "net_pts": 1.76,
-      "score": 3.281888177508159,
+      "total": 23,
+      "wins": 7,
+      "win_rate": 30.4,
+      "rr": 2.7,
+      "net_pts": 36.63,
+      "score": 1.0019992187125333,
       "params": {
-        "j_thresh": 38,
-        "sl_atr": 1.3,
-        "tp1_atr": 1.5,
-        "tp2_atr": 3.2
+        "j_thresh": 40,
+        "sl_atr": 3.4,
+        "tp1_atr": 1.6,
+        "tp2_atr": 4.2
       }
     },
     "QFF_T2": {
-      "total": 14,
-      "wins": 5,
-      "win_rate": 35.7,
-      "rr": 1.35,
-      "net_pts": -24.86,
-      "score": 1.8028257347056866,
+      "total": 5,
+      "wins": 0,
+      "win_rate": 0.0,
+      "rr": 0.0,
+      "net_pts": -71.98,
+      "score": -0.0,
       "params": {
-        "j_thresh": 58,
-        "sl_atr": 2.0,
-        "tp1_atr": 1.5,
-        "tp2_atr": 3.2
+        "j_thresh": 48,
+        "sl_atr": 2.2,
+        "tp1_atr": 1.1,
+        "tp2_atr": 2.8
       }
     },
     "QFF_HEDGE": {
-      "total": 37,
-      "wins": 16,
-      "win_rate": 43.2,
-      "rr": 1.16,
-      "net_pts": -29.52,
-      "score": 3.049143429412786,
+      "total": 15,
+      "wins": 7,
+      "win_rate": 46.7,
+      "rr": 2.63,
+      "net_pts": 115.24,
+      "score": 1.4902186637326136,
       "params": {
-        "j_thresh": 50,
-        "sl_atr": 1.6,
-        "tp1_atr": 1.5,
-        "tp2_atr": 3.2
+        "j_thresh": 80,
+        "sl_atr": 2.8,
+        "tp1_atr": 1.6,
+        "tp2_atr": 4.2
       }
     }
   }
