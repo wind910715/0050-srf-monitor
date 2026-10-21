@@ -291,6 +291,10 @@
       {
         "ts": 1792573216.5408099,
         "p": 108.15
+      },
+      {
+        "ts": 1792573348.408419,
+        "p": 108.15
       }
     ],
     "QFF": [
@@ -561,9 +565,18 @@
       {
         "ts": 1792573216.5408099,
         "p": 2410.0
+      },
+      {
+        "ts": 1792573348.408419,
+        "p": 2411.0
       }
     ],
-    "TXF": []
+    "TXF": [
+      {
+        "ts": 1792573348.408419,
+        "p": 47121.0
+      }
+    ]
   },
   "last_valid_quotes": {
     "TXF": {
@@ -641,5 +654,120 @@
       "enabled": false
     }
   },
-  "last_backtest_ts": 1792571326.9123812
+  "last_backtest_ts": 1792571326.9123812,
+  "optimized_params": {
+    "updated_at": "2026-10-21 17:01",
+    "SRF_S4": {
+      "total": 30,
+      "wins": 16,
+      "win_rate": 53.3,
+      "rr": 1.07,
+      "net_pts": 1.73,
+      "score": 3.1111076811291105,
+      "params": {
+        "j_thresh": 22,
+        "sl_atr": 1.6,
+        "tp1_atr": 1.5,
+        "tp2_atr": 3.2
+      }
+    },
+    "SRF_S1": {
+      "total": 4,
+      "wins": 2,
+      "win_rate": 50.0,
+      "rr": 0.54,
+      "net_pts": -0.65,
+      "score": 0.538047750909322,
+      "params": {
+        "j_thresh": 55,
+        "sl_atr": 2.0,
+        "tp1_atr": 1.1,
+        "tp2_atr": 2.4
+      }
+    },
+    "SRF_S2": {
+      "total": 12,
+      "wins": 5,
+      "win_rate": 41.7,
+      "rr": 1.92,
+      "net_pts": 1.02,
+      "score": 2.7684205834114644,
+      "params": {
+        "j_thresh": 88,
+        "sl_atr": 1.6,
+        "tp1_atr": 1.5,
+        "tp2_atr": 3.2
+      }
+    },
+    "SRF_S3": {
+      "total": 27,
+      "wins": 14,
+      "win_rate": 51.9,
+      "rr": 1.44,
+      "net_pts": 3.78,
+      "score": 3.8711496581688216,
+      "params": {
+        "j_thresh": 65,
+        "sl_atr": 1.3,
+        "tp1_atr": 1.5,
+        "tp2_atr": 3.2
+      }
+    },
+    "SRF_HEDGE": {
+      "total": 13,
+      "wins": 8,
+      "win_rate": 61.5,
+      "rr": 1.33,
+      "net_pts": 2.98,
+      "score": 2.9619376016172567,
+      "params": {
+        "j_thresh": 60,
+        "sl_atr": 1.3,
+        "tp1_atr": 1.5,
+        "tp2_atr": 3.2
+      }
+    },
+    "QFF_T1": {
+      "total": 34,
+      "wins": 15,
+      "win_rate": 44.1,
+      "rr": 1.28,
+      "net_pts": 1.76,
+      "score": 3.281888177508159,
+      "params": {
+        "j_thresh": 38,
+        "sl_atr": 1.3,
+        "tp1_atr": 1.5,
+        "tp2_atr": 3.2
+      }
+    },
+    "QFF_T2": {
+      "total": 14,
+      "wins": 5,
+      "win_rate": 35.7,
+      "rr": 1.35,
+      "net_pts": -24.86,
+      "score": 1.8028257347056866,
+      "params": {
+        "j_thresh": 58,
+        "sl_atr": 2.0,
+        "tp1_atr": 1.5,
+        "tp2_atr": 3.2
+      }
+    },
+    "QFF_HEDGE": {
+      "total": 37,
+      "wins": 16,
+      "win_rate": 43.2,
+      "rr": 1.16,
+      "net_pts": -29.52,
+      "score": 3.049143429412786,
+      "params": {
+        "j_thresh": 50,
+        "sl_atr": 1.6,
+        "tp1_atr": 1.5,
+        "tp2_atr": 3.2
+      }
+    }
+  }
 }
