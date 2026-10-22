@@ -17,12 +17,31 @@
   "daily_flags": {
     "day_standby_date": "2026-10-22",
     "night_standby_date": "",
-    "report_1400_date": ""
+    "report_1400_date": "",
+    "day_open_0845_date": "",
+    "spot_open_0900_date": "2026-10-22",
+    "night_open_1500_date": "",
+    "last_hourly_heartbeat": ""
   },
   "intraday_bars": {
-    "SRF": [],
-    "QFF": [],
-    "TXF": []
+    "SRF": [
+      {
+        "ts": 1792631831.993235,
+        "p": 109.35
+      }
+    ],
+    "QFF": [
+      {
+        "ts": 1792631831.993235,
+        "p": 2437.0
+      }
+    ],
+    "TXF": [
+      {
+        "ts": 1792631831.993235,
+        "p": 47258.0
+      }
+    ]
   },
   "day_close_anchor": {
     "SRF": 108.7,
