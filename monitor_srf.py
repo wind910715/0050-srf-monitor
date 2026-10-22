@@ -26,7 +26,8 @@ TW_TZ = pytz.timezone("Asia/Taipei")
 STATE_FILE = "state.json"
 SIGNAL_COOLDOWN_SEC = 900  # 同一策略 15 分鐘冷卻
 
-ACCOUNT_RESET_VERSION = "2026-10-22_100K_CLEAN_START"
+# 更新版本號：自動清除 105.05 假持倉，重新以 100,000 元乾淨帳本啟動！
+ACCOUNT_RESET_VERSION = "2026-10-22_1815_PURE_TAIFEX_MIS"
 INITIAL_CAPITAL = 100000
 
 TAIFEX_MONTH_CODES = {
@@ -86,11 +87,12 @@ def load_bot_state() -> dict:
           "report_1400_date": "",
           "night_standby_date": "",
           "night_open_1500_date": "",
+          "night_srf_open_1725_date": "",
           "last_hourly_heartbeat": "",
           "last_startup_ping_ts": 0,
       },
       "intraday_bars": {"SRF": [], "QFF": [], "TXF": []},
-      "day_close_anchor": {"SRF": 108.70, "QFF": 2431.0, "TXF": 47121.0},
+      "last_real_quotes": {},
       "active_contract_ym": "",
       "optimized_params": {},
   }
@@ -102,6 +104,7 @@ def load_bot_state() -> dict:
           opt_keep = data.get("optimized_params", {})
           data = default_state.copy()
           data["optimized_params"] = opt_keep
+          print("🔄 已清除錯誤連動持倉，重置為 100,000 元純期交所真實報價帳本！")
         else:
           for k in default_state:
             if k not in data:
@@ -131,7 +134,6 @@ def save_bot_state(state: dict, git_sync: bool = False):
         state["intraday_bars"][k] = state["intraday_bars"][k][-180:]
     with open(STATE_FILE, "w", encoding="utf-8") as f:
       json.dump(state, f, ensure_ascii=False, indent=2)
-    # 若有新進出場訊號或重要帳務變更，立即同步至 GitHub (絕不加 [skip ci])
     if git_sync:
       subprocess.run(["git", "add", STATE_FILE], check=False)
       res = subprocess.run(["git", "diff", "--cached", "--quiet"], check=False)
@@ -212,6 +214,13 @@ def get_contract_rollover_info(now_tw: datetime) -> dict:
 
 
 def get_session_status(now_tw: datetime) -> dict:
+  """精準區分：
+
+  - 早盤：08:10~08:44 備戰，08:45~13:45 實時監控
+  - 收盤報帳：13:46~14:24 結算報表
+  - 夜盤暖機：14:25~14:59 備戰，15:00~17:24 台指夜盤先行(股期17:25開盤待命)
+  - 夜盤全開：17:25~05:00 小0050(SRF)與小台積(QFF)夜盤正式交易！
+  """
   weekday = now_tw.weekday()
   hm = now_tw.hour * 100 + now_tw.minute
   if (
@@ -235,28 +244,35 @@ def get_session_status(now_tw: datetime) -> dict:
   if 845 <= hm <= 1345:
     return {
         "mode": "DAY",
-        "label": "☀️ 早盤實時監控中 (每25秒掃描)",
+        "label": "☀️ 早盤實時監控中 (08:45-13:45)",
         "can_run": True,
         "can_signal": True,
     }
   if 1346 <= hm <= 1424:
     return {
         "mode": "POST_DAY_REPORT",
-        "label": "📊 早盤收盤結算與待命",
+        "label": "📊 早盤收盤結算時段",
         "can_run": True,
         "can_signal": False,
     }
   if 1425 <= hm < 1500:
     return {
         "mode": "STANDBY_NIGHT",
-        "label": "⏳ 夜盤開機備戰中 (15:00開盤)",
+        "label": "⏳ 夜盤開機備戰中 (台指15:00/股期17:25開盤)",
         "can_run": True,
         "can_signal": False,
     }
-  if hm >= 1500 or hm <= 500:
+  if 1500 <= hm < 1725:
+    return {
+        "mode": "NIGHT_TXF_ONLY",
+        "label": "🌙 台指夜盤監控中 (小0050/小台積 17:25 開盤待命)",
+        "can_run": True,
+        "can_signal": False,
+    }
+  if hm >= 1725 or hm <= 500:
     return {
         "mode": "NIGHT",
-        "label": "🌙 夜盤實時監控中 (每25秒掃描)",
+        "label": "🌙 夜盤全商品實時監控中 (17:25-05:00)",
         "can_run": True,
         "can_signal": True,
     }
@@ -297,7 +313,7 @@ def send_tg_message(message: str):
     print(f"TG 推播異常: {e}")
 
 
-# ================= 3. 期交所日夜盤實時報價引擎 =================
+# ================= 3. 純期交所 MIS 真實報價引擎 (還原 KindID="1" + 徹底廢除假連動公式) =================
 def extract_taifex_item(q: dict, target_code: str, target_m: int):
   raw_id = str(q.get("SymbolID", "")).strip()
   disp_name = str(q.get("DispCName", "")).strip()
@@ -326,6 +342,7 @@ def extract_taifex_item(q: dict, target_code: str, target_m: int):
       (m_code == target_code)
       or (f"{target_m:02d}" in disp_name)
       or (f"{target_m}月" in disp_name)
+      or (f"26{target_m:02d}" in disp_name)
   )
 
   lp = safe_float(q.get("CLastPrice"), 0.0)
@@ -334,12 +351,18 @@ def extract_taifex_item(q: dict, target_code: str, target_m: int):
   ref = safe_float(q.get("CRefPrice"), 0.0)
   vol = int(safe_float(q.get("CTotalVolume"), 0))
 
-  eff = (
-      lp
-      if lp > 0
-      else (round((bp + ap) / 2.0, 2) if (bp > 0 and ap > 0) else 0.0)
-  )
-  if eff <= 0:
+  # 優先取最新成交價 (例如 106.60)；若該分鐘尚無成交但有買賣掛單，取委買委賣中價；若為開盤前待命則取平盤參考價 (106.85)
+  has_live_trade = False
+  if lp > 0:
+    eff = lp
+    has_live_trade = True
+  elif bp > 0 and ap > 0:
+    eff = round((bp + ap) / 2.0, 2)
+    has_live_trade = True
+  elif ref > 0:
+    eff = ref
+    has_live_trade = False
+  else:
     return None, None, None
 
   return (
@@ -349,12 +372,14 @@ def extract_taifex_item(q: dict, target_code: str, target_m: int):
           "symbol": clean_id,
           "name": disp_name,
           "price": eff,
+          "last": lp,
           "bid": bp,
           "ask": ap,
           "ref": ref if ref > 0 else eff,
           "high": safe_float(q.get("CHighPrice"), eff),
           "low": safe_float(q.get("CLowPrice"), eff),
           "vol": vol,
+          "has_live": has_live_trade,
           "chg_pct": ((eff - ref) / ref * 100.0) if ref > 0 else 0.0,
       },
   )
@@ -365,8 +390,9 @@ def fetch_all_realtime_data(
 ) -> dict:
   headers = {
       "Content-Type": "application/json;charset=UTF-8",
+      "Accept": "application/json, text/plain, */*",
       "Origin": "https://mis.taifex.com.tw",
-      "Referer": "https://mis.taifex.com.tw/futures/RegularSession/EquityIndices/FuturesDomestic/",
+      "Referer": "https://mis.taifex.com.tw/futures/AfterHoursSession/EquityFutures/",
       "User-Agent": (
           "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML,"
           " like Gecko) Chrome/124.0.0.0 Safari/537.36"
@@ -380,113 +406,136 @@ def fetch_all_realtime_data(
   cands = {"TXF": [], "SRF": [], "QFF": [], "CDF": [], "NYF": []}
   s = requests.Session()
 
-  queries = []
+  # 先輕量取得期交所首頁 Cookie，避免 WAF 阻擋
+  try:
+    s.get(
+        "https://mis.taifex.com.tw/futures/",
+        headers={"User-Agent": headers["User-Agent"]},
+        timeout=4,
+    )
+  except Exception:
+    pass
+
+  # 關鍵修復：全部使用早上 08:02 / 08:38 驗證成功的 KindID="1" 參數！
   for mt in m_types:
-    queries.extend([
+    queries = [
+        {"MarketType": mt, "SymbolType": "F", "KindID": "1", "CID": "SRF"},
+        {"MarketType": mt, "SymbolType": "S", "KindID": "1", "CID": "SRF"},
+        {"MarketType": mt, "SymbolType": "F", "KindID": "1", "CID": "QFF"},
+        {"MarketType": mt, "SymbolType": "S", "KindID": "1", "CID": "QFF"},
         {"MarketType": mt, "SymbolType": "F", "KindID": "1", "CID": "TXF"},
-        {"MarketType": mt, "SymbolType": "S", "KindID": "", "CID": "SRF"},
-        {"MarketType": mt, "SymbolType": "S", "KindID": "", "CID": "QFF"},
-        {"MarketType": mt, "SymbolType": "S", "KindID": "", "CID": "CDF"},
-        {"MarketType": mt, "SymbolType": "F", "KindID": "", "CID": "SRF"},
-        {"MarketType": mt, "SymbolType": "F", "KindID": "", "CID": "QFF"},
         {"MarketType": mt, "SymbolType": "S", "KindID": "1", "CID": ""},
         {"MarketType": mt, "SymbolType": "F", "KindID": "1", "CID": ""},
-    ])
+    ]
+    for q_cfg in queries:
+      # 若當前盤別已成功抓到 TXF, SRF, QFF 的實時成交價，立即提早結束迴圈，不浪費請求！
+      if (
+          mt == m_types[0]
+          and cands["TXF"]
+          and cands["SRF"]
+          and cands["QFF"]
+      ):
+        break
+      try:
+        r = s.post(
+            "https://mis.taifex.com.tw/futures/api/getQuoteList",
+            json={
+                "MarketType": q_cfg["MarketType"],
+                "SymbolType": q_cfg["SymbolType"],
+                "KindID": q_cfg["KindID"],
+                "CID": q_cfg["CID"],
+                "ExpireMonth": "",
+                "RowSize": "全部",
+                "PageNo": "",
+                "SortColumn": "",
+                "AscDesc": "A",
+            },
+            headers=headers,
+            timeout=6,
+        )
+        if r.status_code != 200:
+          continue
+        for q in r.json().get("RtData", {}).get("QuoteList", []):
+          pfx, is_target, item = extract_taifex_item(q, target_code, target_m)
+          if pfx and item:
+            # 優先權：當下盤別 + 有實時成交/掛單 + 目標月份(2611/K6) + 成交量
+            prio = (
+                (4000000 if q_cfg["MarketType"] == m_types[0] else 0)
+                + (2000000 if item["has_live"] else 0)
+                + (1000000 if is_target else 0)
+                + item["vol"]
+            )
+            item["priority"] = prio
+            m_str = "日盤" if q_cfg["MarketType"] == "0" else "夜盤"
+            item["source"] = (
+                f"期交所{m_str}MIS"
+                if item["has_live"]
+                else f"期交所{m_str}參考價"
+            )
+            cands[pfx].append(item)
+        time.sleep(0.15)
+      except Exception:
+        pass
 
-  for q_cfg in queries:
+  # B. 同步使用 getQuoteDetail 直連查詢 2611 (K6) 合約
+  for mt_sfx, m_label in [
+      ("-M" if session_mode != "DAY" else "-F", "夜盤" if session_mode != "DAY" else "日盤"),
+      ("-F" if session_mode != "DAY" else "-M", "日盤" if session_mode != "DAY" else "夜盤"),
+  ]:
+    if cands["TXF"] and cands["SRF"] and cands["QFF"]:
+      break
+    detail_ids = [
+        f"SRF{target_code}{mt_sfx}",
+        f"QFF{target_code}{mt_sfx}",
+        f"CDF{target_code}{mt_sfx}",
+        f"NYF{target_code}{mt_sfx}",
+        f"TXF{target_code}{mt_sfx}",
+    ]
     try:
-      r = s.post(
-          "https://mis.taifex.com.tw/futures/api/getQuoteList",
-          json={
-              "MarketType": q_cfg["MarketType"],
-              "SymbolType": q_cfg["SymbolType"],
-              "KindID": q_cfg["KindID"],
-              "CID": q_cfg["CID"],
-              "ExpireMonth": "",
-              "RowSize": "全部",
-              "PageNo": "",
-              "SortColumn": "",
-              "AscDesc": "A",
-          },
+      rd = s.post(
+          "https://mis.taifex.com.tw/futures/api/getQuoteDetail",
+          json={"SymbolID": detail_ids},
           headers=headers,
-          timeout=4,
+          timeout=6,
       )
-      if r.status_code != 200:
-        continue
-      for q in r.json().get("RtData", {}).get("QuoteList", []):
-        pfx, is_target, item = extract_taifex_item(q, target_code, target_m)
-        if pfx and item:
-          prio = (
-              (2000000 if q_cfg["MarketType"] == m_types[0] else 0)
-              + (1000000 if is_target else 0)
-              + item["vol"]
-          )
-          item["priority"] = prio
-          item["source"] = (
-              f"期交所{'日盤' if q_cfg['MarketType']=='0' else '夜盤'}MIS"
-          )
-          cands[pfx].append(item)
+      if rd.status_code == 200:
+        for q in rd.json().get("RtData", {}).get("QuoteList", []):
+          pfx, is_target, item = extract_taifex_item(q, target_code, target_m)
+          if pfx and item:
+            item["priority"] = (
+                5000000
+                + (2000000 if item["has_live"] else 0)
+                + item["vol"]
+            )
+            item["source"] = f"期交所{m_label}MIS"
+            cands[pfx].append(item)
     except Exception:
       pass
 
-  suffix = "-F" if session_mode == "DAY" else "-M"
-  detail_symbols = []
-  for pfx in ["SRF", "QFF", "CDF", "NYF", "TXF"]:
-    detail_symbols.extend([
-        f"{pfx}{target_code}{suffix}",
-        f"{pfx}   {target_code}{suffix}",
-        f"{pfx}00{target_code}{suffix}",
-    ])
+  # C. 鉅亨網 (cnyes) 台指期日夜盤 24 小時即時 API (作為 TXF 零延遲第二來源)
+  cnyes_txf = None
   try:
-    rd = s.post(
-        "https://mis.taifex.com.tw/futures/api/getQuoteDetail",
-        json={"SymbolID": detail_symbols},
-        headers=headers,
-        timeout=4,
-    )
-    if rd.status_code == 200:
-      for q in rd.json().get("RtData", {}).get("QuoteList", []):
-        pfx, is_target, item = extract_taifex_item(q, target_code, target_m)
-        if pfx and item:
-          item["priority"] = 3000000 + item["vol"]
-          item["source"] = "期交所MIS直連"
-          cands[pfx].append(item)
-  except Exception:
-    pass
-
-  yh_tw = {}
-  try:
-    y_syms = "0050.TW,2330.TW,%23001,WTX%26,WSR%26,WQF%26,WCD%26,WNY%26,WTSRF%26,WTQFF%26"
-    ry = requests.get(
-        f"https://tw.stock.yahoo.com/_td-stock/api/resource/StockServices.stockList;symbols={y_syms}",
+    rc = requests.get(
+        "https://ws.api.cnyes.com/ws/api/v1/charting/history?symbol=TWF:TXF:FUTURES&resolution=1&limit=2",
         headers={"User-Agent": headers["User-Agent"]},
         timeout=5,
     )
-    if ry.status_code == 200:
-      items = ry.json()
-      if isinstance(items, dict):
-        items = items.get("list", [])
-      for it in items:
-        sym = it.get("symbol", "")
-        p = safe_float(it.get("price"), 0.0)
-        if p <= 0:
-          b, a = safe_float(it.get("bid"), 0.0), safe_float(it.get("ask"), 0.0)
-          if b > 0 and a > 0:
-            p = round((b + a) / 2.0, 2)
-        if p > 0:
-          prev = safe_float(it.get("regularMarketPreviousClose"), p)
-          yh_tw[sym] = {
-              "price": p,
-              "ref": prev,
-              "chg_pct": safe_float(
-                  it.get("changePercent"),
-                  ((p - prev) / prev * 100.0) if prev > 0 else 0.0,
-              ),
-              "source": "奇摩即時期貨",
-          }
+    if rc.status_code == 200:
+      d_cn = rc.json().get("data", {})
+      c_list = d_cn.get("c", [])
+      if c_list and safe_float(c_list[0]) > 0:
+        p_cn = safe_float(c_list[0])
+        cnyes_txf = {
+            "price": p_cn,
+            "ref": p_cn,
+            "chg_pct": 0.0,
+            "has_live": True,
+            "source": "鉅亨網台指即時",
+        }
   except Exception:
     pass
 
+  # D. 美股 NQ=F (小那斯達克)、TSM (台積電ADR)、TWD=X 實時報價 (採用 Yahoo Chart meta 確保漲跌幅為當日真實盤別漲跌)
   gl = {}
   for sym in ["NQ=F", "TSM", "TWD=X", "0050.TW", "2330.TW", "^TWII"]:
     try:
@@ -498,15 +547,21 @@ def fetch_all_realtime_data(
         df = df.dropna(subset=["Close"])
         if not df.empty:
           last_p = safe_float(df["Close"].iloc[-1])
-          df_1d = tk.history(period="5d", interval="1d")
-          if isinstance(df_1d.columns, pd.MultiIndex):
-            df_1d.columns = df_1d.columns.get_level_values(0)
-          df_1d = df_1d.dropna(subset=["Close"])
-          prev_c = (
-              safe_float(df_1d["Close"].iloc[-2], last_p)
-              if len(df_1d) >= 2
-              else last_p
-          )
+          # 優先從 fast_info 讀取真實當盤 previous_close，避免跨兩日重複計算跌幅
+          try:
+            prev_c = safe_float(tk.fast_info.get("previous_close"), 0.0)
+          except Exception:
+            prev_c = 0.0
+          if prev_c <= 0:
+            df_1d = tk.history(period="5d", interval="1d")
+            if isinstance(df_1d.columns, pd.MultiIndex):
+              df_1d.columns = df_1d.columns.get_level_values(0)
+            df_1d = df_1d.dropna(subset=["Close"])
+            prev_c = (
+                safe_float(df_1d["Close"].iloc[-2], last_p)
+                if len(df_1d) >= 2
+                else last_p
+            )
           gl[sym] = {
               "price": last_p,
               "ref": prev_c,
@@ -524,79 +579,75 @@ def fetch_all_realtime_data(
       lst.sort(key=lambda x: x["priority"], reverse=True)
       best_tf[k] = lst[0]
 
-  txf_final = best_tf.get("TXF") or yh_tw.get("WTX&")
-  if not txf_final:
-    p_twii = yh_tw.get("%23001", {}).get("price") or gl.get("^TWII", {}).get(
-        "price", 47482.0
-    )
+  # 將成功抓到的期交所真實報價存入 last_real_quotes 記憶庫
+  last_saved = state.setdefault("last_real_quotes", {})
+
+  # 1. 決定 SRF (小型 0050 期貨) 報價 — 絕不使用假連動公式！
+  srf_final = best_tf.get("SRF") or best_tf.get("NYF")
+  if srf_final:
+    last_saved["SRF"] = srf_final
+  elif "SRF" in last_saved:
+    srf_final = last_saved["SRF"].copy()
+    srf_final["has_live"] = False
+    srf_final["source"] = "期交所MIS(前次快取)"
+  else:
+    spot_0050 = gl.get("0050.TW", {}).get("price", 106.85)
+    srf_final = {
+        "price": spot_0050,
+        "ref": spot_0050,
+        "chg_pct": 0.0,
+        "has_live": False,
+        "source": "日盤收盤基準價",
+    }
+
+  # 2. 決定 QFF (小型台積電期貨) 報價 — 絕不使用假連動公式！
+  qff_final = best_tf.get("QFF") or best_tf.get("CDF")
+  if qff_final:
+    last_saved["QFF"] = qff_final
+  elif "QFF" in last_saved:
+    qff_final = last_saved["QFF"].copy()
+    qff_final["has_live"] = False
+    qff_final["source"] = "期交所MIS(前次快取)"
+  else:
+    spot_2330 = gl.get("2330.TW", {}).get("price", 2390.0)
+    qff_final = {
+        "price": spot_2330,
+        "ref": spot_2330,
+        "chg_pct": 0.0,
+        "has_live": False,
+        "source": "日盤收盤基準價",
+    }
+
+  # 3. 決定 TXF (台指期) 報價
+  txf_final = best_tf.get("TXF") or cnyes_txf
+  if txf_final:
+    last_saved["TXF"] = txf_final
+  elif "TXF" in last_saved:
+    txf_final = last_saved["TXF"].copy()
+  else:
+    p_twii = gl.get("^TWII", {}).get("price", 46041.0)
     txf_final = {
         "price": p_twii,
-        "ref": 47121.0,
-        "chg_pct": 0.76,
-        "source": "台指即時",
-    }
-
-  tx_price = txf_final["price"]
-  tx_ref = txf_final["ref"] if txf_final["ref"] > 0 else 47121.0
-  tx_chg_pct = ((tx_price - tx_ref) / tx_ref * 100.0) if tx_ref > 0 else 0.0
-
-  nq_info = gl.get(
-      "NQ=F", {"price": 29789.0, "chg_pct": 0.38, "df_5m": pd.DataFrame()}
-  )
-  tsm_info = gl.get("TSM", {"price": 430.60, "chg_pct": 2.47})
-
-  if best_tf.get("SRF") and best_tf["SRF"]["ref"] > 0:
-    state["day_close_anchor"]["SRF"] = best_tf["SRF"]["ref"]
-  if best_tf.get("QFF") and best_tf["QFF"]["ref"] > 0:
-    state["day_close_anchor"]["QFF"] = best_tf["QFF"]["ref"]
-
-  srf_final = (
-      best_tf.get("SRF")
-      or best_tf.get("NYF")
-      or yh_tw.get("WSR&")
-      or yh_tw.get("WNY&")
-      or yh_tw.get("WTSRF&")
-  )
-  if not srf_final:
-    anchor_srf = safe_float(state["day_close_anchor"].get("SRF"), 108.70)
-    eff_pct = max(tx_chg_pct, nq_info["chg_pct"] * 0.90)
-    p_srf = round((anchor_srf * (1.0 + eff_pct * 0.01)) * 20) / 20.0
-    srf_final = {
-        "price": p_srf,
-        "ref": anchor_srf,
-        "chg_pct": (p_srf - anchor_srf) / anchor_srf * 100.0,
-        "source": "實時連動",
-    }
-
-  qff_final = (
-      best_tf.get("QFF")
-      or best_tf.get("CDF")
-      or yh_tw.get("WQF&")
-      or yh_tw.get("WCD&")
-      or yh_tw.get("WTQFF&")
-  )
-  if not qff_final:
-    anchor_qff = safe_float(state["day_close_anchor"].get("QFF"), 2431.0)
-    eff_qff_pct = max(tx_chg_pct, nq_info["chg_pct"] * 0.76)
-    p_qff = float(round(anchor_qff * (1.0 + eff_qff_pct * 0.01)))
-    qff_final = {
-        "price": p_qff,
-        "ref": anchor_qff,
-        "chg_pct": (p_qff - anchor_qff) / anchor_qff * 100.0,
-        "source": "實時連動",
+        "ref": p_twii,
+        "chg_pct": 0.0,
+        "has_live": False,
+        "source": "加權收盤基準",
     }
 
   return {
       "SRF": srf_final,
       "QFF": qff_final,
       "TXF": txf_final,
-      "NQ": nq_info,
-      "TSM": tsm_info,
+      "NQ": gl.get(
+          "NQ=F",
+          {"price": 29444.0, "chg_pct": 0.0, "df_5m": pd.DataFrame()},
+      ),
+      "TSM": gl.get("TSM", {"price": 430.60, "chg_pct": 0.0}),
       "FX": gl.get("TWD=X", {}).get("price", 32.45),
   }
 
 
-# ================= 4. 徹底消除時區衝突與基差斷層之 K 線引擎 =================
+# ================= 4. K 線基差平移與指標計算引擎 =================
 def build_realtime_df(
     base_symbol: str,
     interval: str,
@@ -612,11 +663,10 @@ def build_realtime_df(
       df.columns = df.columns.get_level_values(0)
     df = df.dropna(subset=["Open", "High", "Low", "Close"]).copy()
 
-    # 取得最後一根現貨 K 線的 UNIX 時間戳，並移除時區標籤以徹底杜絕 pytz / zoneinfo 合併衝突！
     last_df_ts = df.index[-1].timestamp() if not df.empty else 0
     df.index = pd.to_datetime(df.index).tz_localize(None)
 
-    # 基差自動平移校正 (消除期現貨正逆價差與跨夜盤假性跳空，防止 RSI2 卡死在 94)
+    # 將現貨 K 線基準平移對齊至期貨平盤/首筆真實價，消除期現貨價差斷層
     if live_price > 0 and not df.empty:
       last_spot_close = safe_float(df["Close"].iloc[-1], live_price)
       anchor_first_live = (
@@ -625,11 +675,10 @@ def build_realtime_df(
           else live_price
       )
       basis_shift = anchor_first_live - last_spot_close
-      if abs(basis_shift) / max(last_spot_close, 1.0) >= 0.002:
+      if abs(basis_shift) / max(last_spot_close, 1.0) >= 0.0015:
         for col in ["Open", "High", "Low", "Close"]:
           df[col] = df[col] + basis_shift
 
-    # 附加盤中每 25 秒實時採樣的期貨 K 線
     if interval in ["5m", "15m"] and intraday_samples:
       bucket_sec = 300 if interval == "5m" else 900
       grouped = {}
@@ -1042,22 +1091,21 @@ def run_single_scan(
       else 0.0
   )
 
-  # =========================================================================
-  # ★ 全時段開盤、整點與「啟動首輪」強制報到機制
-  # =========================================================================
+  # 只有真正從期交所 MIS 抓到實時成交/買賣掛單 (has_live=True) 且處於交易時段，才允許觸發訊號與寫入 K 線！
+  srf_live_ready = sess["can_signal"] and srf_data.get("has_live", False)
+  qff_live_ready = sess["can_signal"] and qff_data.get("has_live", False)
+
   flags = state.setdefault("daily_flags", {})
   heartbeat_title = None
 
-  # 若為手動啟動第 1 輪，或距離上次啟動回報超過 45 分鐘，立刻發送「常駐引擎啟動確認卡」
   if iter_idx == 0 and (
       force_notify
       or (now_ts - safe_float(flags.get("last_startup_ping_ts"), 0)) >= 2700
   ):
     flags["last_startup_ping_ts"] = now_ts
     force_notify = True
-    heartbeat_title = "🟢 <b>【常駐實時監控引擎已啟動！每 25 秒不間斷備戰中】</b>"
+    heartbeat_title = "🟢 <b>【常駐實時監控引擎已啟動！期交所MIS直連備戰中】</b>"
 
-  # 1. 每日下午 13:50 ~ 14:25 自動發送「每日 14:00 早盤收盤帳務與持倉損益總結」
   if 1350 <= hm <= 1425 and flags.get("report_1400_date") != today_str:
     flags["report_1400_date"] = today_str
     report_msg = format_1400_daily_report(
@@ -1065,37 +1113,30 @@ def run_single_scan(
     )
     send_tg_message(report_msg)
 
-  # 2. 08:10 ~ 08:44 早盤開機備戰報到
   if 810 <= hm < 845 and flags.get("day_standby_date") != today_str:
     flags["day_standby_date"] = today_str
     force_notify = True
     heartbeat_title = "🚀 <b>【08:15 早盤開機備戰完成｜10萬保證金待命中】</b>"
-
-  # 3. 08:45 ~ 08:59 期貨早盤正式開盤報到
   elif 845 <= hm < 900 and flags.get("day_open_0845_date") != today_str:
     flags["day_open_0845_date"] = today_str
     force_notify = True
     heartbeat_title = "🔔 <b>【08:45 期貨早盤正式開盤！實時訊號掃描啟動】</b>"
-
-  # 4. 09:00 ~ 09:20 台股現貨開盤共振報到
   elif 900 <= hm <= 920 and flags.get("spot_open_0900_date") != today_str:
     flags["spot_open_0900_date"] = today_str
     force_notify = True
     heartbeat_title = "🔥 <b>【09:00 現貨開盤共振！基差對齊已完成】</b>"
-
-  # 5. 14:25 ~ 14:59 夜盤開機備戰報到
   elif 1425 <= hm < 1500 and flags.get("night_standby_date") != today_str:
     flags["night_standby_date"] = today_str
     force_notify = True
-    heartbeat_title = "🚀 <b>【14:30 夜盤開機備戰完成｜15:00 準時開戰】</b>"
-
-  # 6. 15:00 ~ 15:20 夜盤正式開盤報到
+    heartbeat_title = "🚀 <b>【14:30 夜盤開機備戰完成｜台指15:00/股期17:25開盤】</b>"
   elif 1500 <= hm <= 1520 and flags.get("night_open_1500_date") != today_str:
     flags["night_open_1500_date"] = today_str
     force_notify = True
-    heartbeat_title = "🌙 <b>【15:00 期貨夜盤正式開盤！實時監控啟動】</b>"
-
-  # 7. 盤中每小時整點自動平安打卡
+    heartbeat_title = "🌙 <b>【15:00 台指夜盤開盤！小0050/小台積 17:25 開盤待命】</b>"
+  elif 1725 <= hm <= 1745 and flags.get("night_srf_open_1725_date") != today_str:
+    flags["night_srf_open_1725_date"] = today_str
+    force_notify = True
+    heartbeat_title = "🔥 <b>【17:25 小0050與小台積夜盤正式開盤！實時訊號全開】</b>"
   elif (
       sess["can_signal"]
       and (0 <= now_tw.minute <= 5)
@@ -1103,31 +1144,52 @@ def run_single_scan(
   ):
     flags["last_hourly_heartbeat"] = hour_key
     force_notify = True
-    heartbeat_title = f"📡 <b>【{now_tw.hour:02d}:00 整點實時盯盤回報｜系統持續運轉中】</b>"
+    heartbeat_title = f"📡 <b>【{now_tw.hour:02d}:00 整點實時盯盤回報｜期交所MIS連線正常】</b>"
 
-  if sess["can_signal"]:
+  if srf_live_ready:
     state["intraday_bars"].setdefault("SRF", []).append(
         {"ts": now_ts, "p": srf_price}
     )
+  if qff_live_ready:
     state["intraday_bars"].setdefault("QFF", []).append(
         {"ts": now_ts, "p": qff_price}
     )
+  if txf_data.get("has_live", False):
     state["intraday_bars"].setdefault("TXF", []).append(
         {"ts": now_ts, "p": tx_price}
     )
 
-  # 同時建立 15m 與 5m 實時 K 線，確保盤中短線與波段訊號皆能即時捕捉
+  # 以期交所平盤參考價 (例如 106.85) 作為 K 線平移錨點，確保盤中漲跌幅度與看盤軟體完全一致
+  srf_ref_anchor = safe_float(srf_data.get("ref"), srf_price)
+  qff_ref_anchor = safe_float(qff_data.get("ref"), qff_price)
+
   df_15m = build_realtime_df(
-      "0050.TW", "15m", "30d", srf_price, state["intraday_bars"].get("SRF", [])
+      "0050.TW",
+      "15m",
+      "30d",
+      srf_price,
+      state["intraday_bars"].get("SRF") or [{"ts": now_ts, "p": srf_ref_anchor}],
   )
   df_5m = build_realtime_df(
-      "0050.TW", "5m", "5d", srf_price, state["intraday_bars"].get("SRF", [])
+      "0050.TW",
+      "5m",
+      "5d",
+      srf_price,
+      state["intraday_bars"].get("SRF") or [{"ts": now_ts, "p": srf_ref_anchor}],
   )
   tw2330_15m = build_realtime_df(
-      "2330.TW", "15m", "30d", qff_price, state["intraday_bars"].get("QFF", [])
+      "2330.TW",
+      "15m",
+      "30d",
+      qff_price,
+      state["intraday_bars"].get("QFF") or [{"ts": now_ts, "p": qff_ref_anchor}],
   )
   tw2330_5m = build_realtime_df(
-      "2330.TW", "5m", "5d", qff_price, state["intraday_bars"].get("QFF", [])
+      "2330.TW",
+      "5m",
+      "5d",
+      qff_price,
+      state["intraday_bars"].get("QFF") or [{"ts": now_ts, "p": qff_ref_anchor}],
   )
   tx_15m = build_realtime_df(
       "^TWII", "15m", "30d", tx_price, state["intraday_bars"].get("TXF", [])
@@ -1166,8 +1228,8 @@ def run_single_scan(
       safe_float(nq_5m["MACD_Hist"].iloc[-1], 0.0) if not nq_5m.empty else 0.0
   )
 
-  nq_bullish = (nq_price >= nq_ma20 or nq_macd >= 0) and nq_chg_pct >= -0.25
-  nq_bearish = (nq_price < nq_ma20 and nq_macd < 0) or nq_chg_pct <= -0.35
+  nq_bullish = (nq_price >= nq_ma20 or nq_macd >= 0) and nq_chg_pct >= -0.35
+  nq_bearish = (nq_price < nq_ma20 and nq_macd < 0) or nq_chg_pct <= -0.45
 
   tx_bullish = tx_price >= tx_chip_poc or (
       tx_price >= P and tx_price >= tx_ma20
@@ -1180,25 +1242,29 @@ def run_single_scan(
   t_m5, t_m5_p = tw2330_5m.iloc[-1], tw2330_5m.iloc[-2]
 
   opt = state.get("optimized_params", {})
-  srf_atr = max(safe_float(m15["ATR"], 0.45), 0.40)
+  srf_atr = max(safe_float(m15["ATR"], 0.40), 0.35)
   qff_atr = max(safe_float(t_m15["ATR"], 14.0), 12.0)
 
-  srf_sl_dist = max(round((srf_atr * 1.25) * 20) / 20.0, 0.55)
-  srf_tp1_dist = max(round((srf_atr * 1.05) * 20) / 20.0, 0.50)
-  srf_tp2_dist = max(round((srf_atr * 3.60) * 20) / 20.0, 1.65)
+  srf_sl_dist = max(round((srf_atr * 1.25) * 20) / 20.0, 0.50)
+  srf_tp1_dist = max(round((srf_atr * 1.05) * 20) / 20.0, 0.45)
+  srf_tp2_dist = max(round((srf_atr * 3.50) * 20) / 20.0, 1.50)
 
   qff_sl_dist = max(round((qff_atr * 1.25) / 5) * 5, 20.0)
   qff_tp1_dist = max(round((qff_atr * 1.05) / 5) * 5, 20.0)
-  qff_tp2_dist = max(round((qff_atr * 3.60) / 5) * 5, 60.0)
+  qff_tp2_dist = max(round((qff_atr * 3.50) / 5) * 5, 55.0)
 
   srf_chip = round(safe_float(m15["Chip_POC"], srf_price), 2)
   qff_chip = round(safe_float(t_m15["Chip_POC"], qff_price))
 
   cards_to_send = []
 
-  if sess["can_signal"]:
+  if srf_live_ready or qff_live_ready:
     urgent_exits = evaluate_urgent_exits(
-        state, srf_price, qff_price, roll_info, now_tw.strftime("%H:%M:%S")
+        state,
+        srf_price if srf_live_ready else 0.0,
+        qff_price if qff_live_ready else 0.0,
+        roll_info,
+        now_tw.strftime("%H:%M:%S"),
     )
     cards_to_send.extend(urgent_exits)
 
@@ -1277,15 +1343,14 @@ def run_single_scan(
     )
     cards_to_send.append(card)
 
-  if sess["can_signal"]:
-    mkt_ctx_bull = f"小那({nq_price:.0f}/{nq_chg_pct:+.2f}%)偏多｜台指({tx_price:.0f})守穩籌碼重心({tx_chip_poc})與樞紐({P})"
-    mkt_ctx_bear = f"小那({nq_price:.0f}/{nq_chg_pct:+.2f}%)轉弱｜台指({tx_price:.0f})跌破籌碼重心({tx_chip_poc})或極限正乖離衰竭"
+  mkt_ctx_bull = f"小那({nq_price:.0f}/{nq_chg_pct:+.2f}%)｜台指({tx_price:.0f})守穩籌碼重心({tx_chip_poc})與樞紐({P})"
+  mkt_ctx_bear = f"小那({nq_price:.0f}/{nq_chg_pct:+.2f}%)｜台指({tx_price:.0f})跌破籌碼重心({tx_chip_poc})或極限乖離衰竭"
 
-    # ---------------- 🎯【0050 小股期 (SRF) — 預設每次進場 2 口】 ----------------
+  # ---------------- 🎯【0050 小股期 (SRF) — 必須有期交所真實報價 srf_live_ready 才觸發】 ----------------
+  if srf_live_ready:
     prev_srf_mid = (
         safe_float(m15_p["Open"]) + safe_float(m15_p["Close"])
     ) / 2.0
-    # [優先 1] 策略4 賺賠比升級版 (支援 15m 或 5m 超賣收腳即時觸發)
     if (
         srf_price >= safe_float(m15["MA120"]) * 0.985
         and (
@@ -1318,8 +1383,6 @@ def run_single_scan(
           ".2f",
           mkt_ctx_bull,
       )
-
-    # [優先 2] 策略1 波段回踩
     elif (
         tx_bullish
         and nq_bullish
@@ -1352,8 +1415,6 @@ def run_single_scan(
           ".2f",
           mkt_ctx_bull,
       )
-
-    # [優先 3] ✅ 策略2 VCP 突破 (70.0% / 3.27R)
     elif (
         safe_float(m15_p["VCP_Ratio"]) <= 0.96
         and srf_price > safe_float(m15["MA10"])
@@ -1382,8 +1443,6 @@ def run_single_scan(
           ".2f",
           mkt_ctx_bull,
       )
-
-    # [優先 4] ✅ 策略3 日夜盤籌碼順勢多 (66.7% / 3.99R)
     elif (
         tx_bullish
         and nq_bullish
@@ -1414,8 +1473,6 @@ def run_single_scan(
           ".2f",
           mkt_ctx_bull,
       )
-
-    # [優先 5] ✅ 策略5 避險/對鎖 (61.1% / 2.08R)
     elif (
         (
             (
@@ -1451,11 +1508,11 @@ def run_single_scan(
           mkt_ctx_bear,
       )
 
-    # ---------------- 👑【小台積電期貨 (QFF) — 預設每次進場 1 口】 ----------------
+  # ---------------- 👑【小台積電期貨 (QFF) — 必須有期交所真實報價 qff_live_ready 才觸發】 ----------------
+  if qff_live_ready:
     prev_qff_mid = (
         safe_float(t_m15_p["Open"]) + safe_float(t_m15_p["Close"])
     ) / 2.0
-    # [台積優先 1] 台積 T1 賺賠比升級版
     if (
         qff_price >= safe_float(t_m15["MA120"]) * 0.985
         and (
@@ -1488,8 +1545,6 @@ def run_single_scan(
           ".0f",
           mkt_ctx_bull,
       )
-
-    # [台積優先 2] ✅ 台積 T2 (83.3% / 4.50R)
     elif (
         tx_bullish
         and nq_bullish
@@ -1520,8 +1575,6 @@ def run_single_scan(
           ".0f",
           mkt_ctx_bull,
       )
-
-    # [台積優先 3] 🛡️ 台積 T3 勝率重構版
     elif (
         (
             (
@@ -1572,7 +1625,7 @@ def run_single_scan(
     srf_pullback_buy = (
         srf_chip
         if srf_chip < srf_price
-        else round(min(safe_float(m15["BB_Lower"]), srf_price - 0.35), 2)
+        else round(min(safe_float(m15["BB_Lower"]), srf_price - 0.30), 2)
     )
     qff_pullback_buy = (
         qff_chip
@@ -1595,13 +1648,15 @@ def run_single_scan(
         f"{pos_header}\n"
         "━━━━━━━━━━━━━━━━━━\n"
         f"🎯 <b>0050小期 ({roll_info['target_label']}) 現價：<code>{srf_price:.2f} 元 ({srf_data['chg_pct']:+.2f}%)</code></b>\n"
-        f"• 報價來源：{srf_data['source']}｜RSI(2)：<code>{safe_float(m15['RSI2']):.0f}</code>｜15m J值：<code>{safe_float(m15['J']):.0f}</code>\n"
-        f"• 🟢 <b>低接買點</b>：回測支撐 <b><code>{srf_pullback_buy:.2f} 元</code></b>｜🚀 <b>順勢/突破買點</b>：站穩籌碼重心 <b><code>{srf_chip:.2f} 元</code></b>\n"
+        f"• 報價來源：<b>{srf_data['source']}</b> (平盤參考價 <code>{srf_data.get('ref', srf_price):.2f}</code>)\n"
+        f"• 指標位階：RSI(2) <code>{safe_float(m15['RSI2']):.0f}</code>｜15m J值 <code>{safe_float(m15['J']):.0f}</code>\n"
+        f"• 🟢 <b>低接買點</b>：回測支撐 <b><code>{srf_pullback_buy:.2f} 元</code></b>｜🚀 <b>順勢買點</b>：站穩籌碼 <b><code>{srf_chip:.2f} 元</code></b>\n"
         f"  └ 對應停損：<code>{srf_price-srf_sl_dist:.2f}</code>｜第一停利：<code>{srf_price+srf_tp1_dist:.2f}</code>｜目標：<code>{srf_price+srf_tp2_dist:.2f}</code>\n"
         f"• 🛡️ <b>做空避險/對鎖價</b>：跌破支撐 <b><code>{safe_float(m15['Support_Low']):.2f} 元</code></b> 啟動\n\n"
         f"👑 <b>小台積期 ({roll_info['target_label']}) 現價：<code>{qff_price:.0f} 元 ({qff_data['chg_pct']:+.2f}%)</code></b>\n"
-        f"• 報價來源：{qff_data['source']}｜RSI(2)：<code>{safe_float(t_m15['RSI2']):.0f}</code>｜15m J值：<code>{safe_float(t_m15['J']):.0f}</code>\n"
-        f"• 🟢 <b>低接買點</b>：回測支撐 <b><code>{qff_pullback_buy:.0f} 元</code></b>｜🚀 <b>順勢/突破買點</b>：站穩籌碼重心 <b><code>{qff_chip:.0f} 元</code></b>\n"
+        f"• 報價來源：<b>{qff_data['source']}</b> (平盤參考價 <code>{qff_data.get('ref', qff_price):.0f}</code>)\n"
+        f"• 指標位階：RSI(2) <code>{safe_float(t_m15['RSI2']):.0f}</code>｜15m J值 <code>{safe_float(t_m15['J']):.0f}</code>\n"
+        f"• 🟢 <b>低接買點</b>：回測支撐 <b><code>{qff_pullback_buy:.0f} 元</code></b>｜🚀 <b>順勢買點</b>：站穩籌碼 <b><code>{qff_chip:.0f} 元</code></b>\n"
         f"  └ 對應停損：<code>{qff_price-qff_sl_dist:.0f}</code>｜第一停利：<code>{qff_price+qff_tp1_dist:.0f}</code>｜目標：<code>{qff_price+qff_tp2_dist:.0f}</code>\n"
         f"• 🛡️ <b>做空避險/對鎖價</b>：跌破支撐 <b><code>{safe_float(t_m15['Support_Low']):.0f} 元</code></b> 啟動\n"
         "━━━━━━━━━━━━━━━━━━\n"
@@ -1613,8 +1668,8 @@ def run_single_scan(
   else:
     print(
         f"[{now_str}] 第 {iter_idx+1}/{MAX_ITERATIONS} 輪"
-        f" ({sess['label']}) | SRF={srf_price:.2f}(籌碼{srf_chip:.2f}) |"
-        f" QFF={qff_price:.0f}(籌碼{qff_chip:.0f}) | TX={tx_price:.0f}"
+        f" ({sess['label']}) | SRF={srf_price:.2f}({srf_data['source']}) |"
+        f" QFF={qff_price:.0f}({qff_data['source']}) | TX={tx_price:.0f}"
     )
 
   state_after = json.dumps(state, sort_keys=True)
@@ -1628,7 +1683,6 @@ def main():
     for i in range(MAX_ITERATIONS):
       now_tw = datetime.now(TW_TZ)
       sess = get_session_status(now_tw)
-      # 第 1 輪若為手動觸發 (FORCE_REPORT=True)，即使休市也強制跑 1 次發送診斷卡
       if sess["can_run"] or (i == 0 and FORCE_REPORT):
         try:
           is_force = FORCE_REPORT and (i == 0)
