@@ -2,8 +2,8 @@ name: 0050 & TSMC Futures Pro-Max Monitor
 
 on:
   schedule:
-    # 台灣時間 週一至週五 全天候每 5 分鐘啟動一次 (內部自動判斷 08:10 早盤備戰、14:00 收盤損益結算報表、14:26 夜盤備戰，徹底消除排程衝突！)
-    - cron: '*/5 0-21 * * 1-5'
+    # 備援喚醒排程：每 15 分鐘檢查一次，若常駐任務未在執行則自動喚醒
+    - cron: '*/15 0-21 * * 1-5'
     # 每週六早上 09:00 (台灣時間，對應 UTC 週六 01:00) 自動執行策略回測報告
     - cron: '0 1 * * 6'
   workflow_dispatch:
@@ -16,17 +16,20 @@ on:
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
+# 賦予讀寫 state.json 與自動接力觸發下一棒 workflow 的權限
 permissions:
   contents: write
+  actions: write
 
 concurrency:
   group: srf-qff-high-freq-monitor
-  cancel-in-progress: true
+  # 手動按 Run workflow 時立即插隊啟動新常駐引擎；排程喚醒時若已有常駐引擎在跑則不中斷它！
+  cancel-in-progress: ${{ github.event_name == 'workflow_dispatch' }}
 
 jobs:
   high_freq_monitor:
     runs-on: ubuntu-latest
-    timeout-minutes: 6
+    timeout-minutes: 60
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
@@ -43,6 +46,11 @@ jobs:
           python -m pip install --upgrade pip
           pip install yfinance pandas numpy requests pytz
 
+      - name: Configure Git for Real-Time State Saving
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
       - name: Run Weekly Backtest (Every Saturday 09:00 TW or Manual Trigger)
         if: github.event.schedule == '0 1 * * 6' || github.event.inputs.run_backtest == 'true'
         env:
@@ -50,26 +58,48 @@ jobs:
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
         run: python weekly_backtest.py
 
-      - name: Run 30-Second Realtime Strategy Engine
+      - name: Run 50-Minute Continuous Realtime Strategy Engine (Every 25s)
         if: github.event.schedule != '0 1 * * 6'
         env:
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
-          POLL_INTERVAL_SEC: '30'
-          MAX_ITERATIONS: ${{ github.event_name == 'workflow_dispatch' && '1' || '8' }}
+          POLL_INTERVAL_SEC: '25'
+          # 無論手動或排程啟動，一律連續常駐執行 115 輪 (約 50 分鐘不間斷實時監控！)
+          MAX_ITERATIONS: '115'
           FORCE_REPORT: ${{ github.event_name == 'workflow_dispatch' }}
         run: python monitor_srf.py
 
-      - name: Persist Position & Account State
-        if: github.event.schedule != '0 1 * * 6'
+      - name: Persist Position & Account State (No skip-ci)
+        if: always() && github.event.schedule != '0 1 * * 6'
         run: |
           if [ -f state.json ]; then
-            git config user.name "github-actions[bot]"
-            git config user.email "github-actions[bot]@users.noreply.github.com"
             git add state.json
             if ! git diff --cached --quiet; then
-              git commit -m "chore: update bot account & position state [skip ci]"
+              git commit -m "chore: sync realtime bot state"
               git pull --rebase origin ${{ github.ref_name }} || true
               git push origin ${{ github.ref_name }} || true
             fi
           fi
+
+      - name: Auto-Relay Next 50-Minute Monitoring Session
+        if: always() && github.event.schedule != '0 1 * * 6'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python -c '
+          from datetime import datetime
+          import pytz, subprocess
+          now_tw = datetime.now(pytz.timezone("Asia/Taipei"))
+          wd = now_tw.weekday()
+          hm = now_tw.hour * 100 + now_tw.minute
+          active = False
+          if wd < 5 and ((810 <= hm <= 1410) or (hm >= 1425) or (hm <= 502)):
+              active = True
+          elif wd == 5 and hm <= 502:
+              active = True
+          if active:
+              print("🔄 交易/備戰時段持續中，自動觸發下一棒 50 分鐘常駐監控任務...")
+              subprocess.run(["gh", "workflow", "run", "monitor.yml", "--ref", "${{ github.ref_name }}"], check=False)
+          else:
+              print("🛑 目前為休盤時段，暫停自動接力。")
+          '
