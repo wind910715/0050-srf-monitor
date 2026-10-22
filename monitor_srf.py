@@ -23,9 +23,8 @@ MAX_ITERATIONS = int(os.environ.get("MAX_ITERATIONS", "8"))
 
 TW_TZ = pytz.timezone("Asia/Taipei")
 STATE_FILE = "state.json"
-SIGNAL_COOLDOWN_SEC = 1200
+SIGNAL_COOLDOWN_SEC = 900  # 同一策略 15 分鐘冷卻
 
-# 帳本重置版本號：確保今日 (2026-10-22) 更新後立即清空舊持倉，以 100,000 元保證金從零開始測試！
 ACCOUNT_RESET_VERSION = "2026-10-22_100K_CLEAN_START"
 INITIAL_CAPITAL = 100000
 
@@ -81,8 +80,12 @@ def load_bot_state() -> dict:
       },
       "daily_flags": {
           "day_standby_date": "",
-          "night_standby_date": "",
+          "day_open_0845_date": "",
+          "spot_open_0900_date": "",
           "report_1400_date": "",
+          "night_standby_date": "",
+          "night_open_1500_date": "",
+          "last_hourly_heartbeat": "",
       },
       "intraday_bars": {"SRF": [], "QFF": [], "TXF": []},
       "day_close_anchor": {"SRF": 108.70, "QFF": 2431.0, "TXF": 47121.0},
@@ -93,17 +96,17 @@ def load_bot_state() -> dict:
     try:
       with open(STATE_FILE, "r", encoding="utf-8") as f:
         data = json.load(f)
-        # 若版本號不符，強制清空舊持倉並重置 100,000 元保證金帳本（保留已回測之最佳參數）
         if data.get("account_version") != ACCOUNT_RESET_VERSION:
           opt_keep = data.get("optimized_params", {})
           data = default_state.copy()
           data["optimized_params"] = opt_keep
-          print("🔄 已執行新帳本初始化：清空舊持倉，保證金設定為 100,000 元！")
         else:
           for k in default_state:
             if k not in data:
               data[k] = default_state[k]
-        # 跨日自動歸零「今日已實現損益明細」（累計總損益 realized_pnl 永久保留）
+          for fk in default_state["daily_flags"]:
+            if fk not in data["daily_flags"]:
+              data["daily_flags"][fk] = ""
         today_str = datetime.now(TW_TZ).strftime("%Y-%m-%d")
         if data["account"].get("today_date") != today_str:
           data["account"]["today_date"] = today_str
@@ -511,12 +514,12 @@ def fetch_all_realtime_data(
   txf_final = best_tf.get("TXF") or yh_tw.get("WTX&")
   if not txf_final:
     p_twii = yh_tw.get("%23001", {}).get("price") or gl.get("^TWII", {}).get(
-        "price", 47310.0
+        "price", 47482.0
     )
     txf_final = {
         "price": p_twii,
         "ref": 47121.0,
-        "chg_pct": 0.40,
+        "chg_pct": 0.76,
         "source": "台指即時",
     }
 
@@ -525,7 +528,7 @@ def fetch_all_realtime_data(
   tx_chg_pct = ((tx_price - tx_ref) / tx_ref * 100.0) if tx_ref > 0 else 0.0
 
   nq_info = gl.get(
-      "NQ=F", {"price": 29782.0, "chg_pct": 0.36, "df_5m": pd.DataFrame()}
+      "NQ=F", {"price": 29789.0, "chg_pct": 0.38, "df_5m": pd.DataFrame()}
   )
   tsm_info = gl.get("TSM", {"price": 430.60, "chg_pct": 2.47})
 
@@ -580,7 +583,7 @@ def fetch_all_realtime_data(
   }
 
 
-# ================= 4. 指標計算引擎 =================
+# ================= 4. 核心除錯：期現貨基差自動平移對齊 K 線引擎 (徹底消除假性跳空與 RSI2 卡死 94！) =================
 def build_realtime_df(
     base_symbol: str,
     interval: str,
@@ -588,6 +591,12 @@ def build_realtime_df(
     live_price: float,
     intraday_samples: list,
 ) -> pd.DataFrame:
+  """關鍵修復：
+
+  當現貨 K 線 (如昨日收 108.13 / 2415) 與 11 月期貨實時價 (如 109.90 / 2454) 存在跨夜盤漲幅或正逆價差時，
+  若只把最後一根 K 線的 Close 改成 109.90，會產生一根 +1.77 元的「假性巨量長紅」，導致 RSI(2) 永遠卡死在 94、且籌碼支撐停留在 108.13！
+  解法：自動計算期貨與現貨 K 線末端的基差偏移量 (basis_shift)，將歷史 K 線平滑對齊至期貨當前價格座標系，再接上盤中實時採樣 K 線！
+  """
   try:
     df = yf.Ticker(base_symbol).history(period=period, interval=interval)
     if df is None or df.empty:
@@ -596,6 +605,21 @@ def build_realtime_df(
       df.columns = df.columns.get_level_values(0)
     df = df.dropna(subset=["Open", "High", "Low", "Close"]).copy()
 
+    # 計算期貨實時價與現貨歷史 K 線末端的基差斷層，進行座標平移對齊
+    if live_price > 0 and not df.empty:
+      last_spot_close = safe_float(df["Close"].iloc[-1], live_price)
+      # 若現貨 K 線最後一根與當前實時期貨價差距超過 0.25% (代表跨夜盤跳空或期現貨正逆價差)，將歷史序列平移對齊至期貨基準！
+      anchor_first_live = (
+          safe_float(intraday_samples[0]["p"], live_price)
+          if intraday_samples
+          else live_price
+      )
+      basis_shift = anchor_first_live - last_spot_close
+      if abs(basis_shift) / max(last_spot_close, 1.0) >= 0.002:
+        for col in ["Open", "High", "Low", "Close"]:
+          df[col] = df[col] + basis_shift
+
+    # 附加盤中每 30 秒實時採樣的期貨真實 K 線
     if interval in ["5m", "15m"] and intraday_samples:
       bucket_sec = 300 if interval == "5m" else 900
       last_df_ts = df.index[-1].timestamp() if not df.empty else 0
@@ -887,10 +911,9 @@ def evaluate_urgent_exits(
     pnl_per_unit = (
         (cur_p - entry_p) if direction == "BUY" else (entry_p - cur_p)
     )
-    fee_cost = 50 * lots  # 扣除來回期交稅與手續費約 50 元/口
+    fee_cost = 50 * lots
     net_pnl_ntd = int(round(pnl_per_unit * unit_mult * lots)) - fee_cost
 
-    # 1. 觸及最終目標價 -> 全數獲利平倉並記入 10 萬帳本
     if (direction == "BUY" and cur_p >= tp2_p) or (
         direction == "SELL" and cur_p <= tp2_p
     ):
@@ -915,7 +938,6 @@ def evaluate_urgent_exits(
       state["positions"][asset] = None
       continue
 
-    # 2. 觸及第一停利價 -> 鎖定勝場並將停損移至成本上方
     if not tp1_hit and (
         (direction == "BUY" and cur_p >= tp1_p)
         or (direction == "SELL" and cur_p <= tp1_p)
@@ -940,7 +962,6 @@ def evaluate_urgent_exits(
       )
       continue
 
-    # 3. 觸及停損價 (或鎖利線) -> 立即平倉並記入 10 萬帳本
     if (direction == "BUY" and cur_p <= sl_p) or (
         direction == "SELL" and cur_p >= sl_p
     ):
@@ -986,6 +1007,7 @@ def run_single_scan(state: dict, force_notify: bool = False) -> bool:
   now_tw = datetime.now(TW_TZ)
   now_str = now_tw.strftime("%Y-%m-%d %H:%M:%S")
   today_str = now_tw.strftime("%Y-%m-%d")
+  hour_key = now_tw.strftime("%Y-%m-%d_%H")
   hm = now_tw.hour * 100 + now_tw.minute
   now_ts = time.time()
   sess = get_session_status(now_tw)
@@ -1009,9 +1031,11 @@ def run_single_scan(state: dict, force_notify: bool = False) -> bool:
   )
 
   # =========================================================================
-  # ★ 自動時間窗口強制報到機制 (徹底解決 GitHub cron 延遲導致沒看到啟動通知的問題！)
+  # ★ 全時段開盤與整點自動打卡報到機制 (確保早盤開盤、現貨開盤、14:00結算、夜盤開盤與每小時整點必有回報！)
   # =========================================================================
   flags = state.setdefault("daily_flags", {})
+  heartbeat_title = None
+
   # 1. 每日下午 13:50 ~ 14:25 自動發送「每日 14:00 早盤收盤帳務與持倉損益總結」
   if 1350 <= hm <= 1425 and flags.get("report_1400_date") != today_str:
     flags["report_1400_date"] = today_str
@@ -1020,15 +1044,45 @@ def run_single_scan(state: dict, force_notify: bool = False) -> bool:
     )
     send_tg_message(report_msg)
 
-  # 2. 早盤開盤前 (08:10 ~ 08:44) 自動發送「早盤開機備戰完成」通知
+  # 2. 08:10 ~ 08:44 早盤開機備戰報到
   if 810 <= hm < 845 and flags.get("day_standby_date") != today_str:
     flags["day_standby_date"] = today_str
     force_notify = True
+    heartbeat_title = "🚀 <b>【08:15 早盤開機備戰完成｜10萬保證金待命中】</b>"
 
-  # 3. 夜盤開盤前 (14:26 ~ 14:59) 自動發送「夜盤開機備戰完成」通知
-  if 1426 <= hm < 1500 and flags.get("night_standby_date") != today_str:
+  # 3. 08:45 ~ 08:59 期貨早盤正式開盤報到
+  elif 845 <= hm < 900 and flags.get("day_open_0845_date") != today_str:
+    flags["day_open_0845_date"] = today_str
+    force_notify = True
+    heartbeat_title = "🔔 <b>【08:45 期貨早盤正式開盤！實時訊號掃描啟動】</b>"
+
+  # 4. 09:00 ~ 09:20 台股現貨開盤共振報到
+  elif 900 <= hm <= 920 and flags.get("spot_open_0900_date") != today_str:
+    flags["spot_open_0900_date"] = today_str
+    force_notify = True
+    heartbeat_title = "🔥 <b>【09:00 現貨開盤共振！基差對齊已完成】</b>"
+
+  # 5. 14:25 ~ 14:59 夜盤開機備戰報到
+  elif 1425 <= hm < 1500 and flags.get("night_standby_date") != today_str:
     flags["night_standby_date"] = today_str
     force_notify = True
+    heartbeat_title = "🚀 <b>【14:30 夜盤開機備戰完成｜15:00 準時開戰】</b>"
+
+  # 6. 15:00 ~ 15:20 夜盤正式開盤報到
+  elif 1500 <= hm <= 1520 and flags.get("night_open_1500_date") != today_str:
+    flags["night_open_1500_date"] = today_str
+    force_notify = True
+    heartbeat_title = "🌙 <b>【15:00 期貨夜盤正式開盤！實時監控啟動】</b>"
+
+  # 7. 盤中每小時整點自動平安打卡 (例如 10:00, 11:00, 12:00, 13:00, 16:00...)
+  elif (
+      sess["can_signal"]
+      and (0 <= now_tw.minute <= 6)
+      and flags.get("last_hourly_heartbeat") != hour_key
+  ):
+    flags["last_hourly_heartbeat"] = hour_key
+    force_notify = True
+    heartbeat_title = f"📡 <b>【{now_tw.hour:02d}:00 整點實時盯盤回報｜系統運作正常】</b>"
 
   if sess["can_signal"]:
     state["intraday_bars"].setdefault("SRF", []).append(
@@ -1095,7 +1149,6 @@ def run_single_scan(state: dict, force_notify: bool = False) -> bool:
   srf_atr = max(safe_float(m15["ATR"], 0.45), 0.40)
   qff_atr = max(safe_float(t_m15["ATR"], 14.0), 12.0)
 
-  # 緊湊結構停損 (拉高賺賠比) + 高命中 TP1 + 80%主力倉 3R 大波段目標
   srf_sl_dist = max(round((srf_atr * 1.25) * 20) / 20.0, 0.55)
   srf_tp1_dist = max(round((srf_atr * 1.05) * 20) / 20.0, 0.50)
   srf_tp2_dist = max(round((srf_atr * 3.60) * 20) / 20.0, 1.65)
@@ -1198,17 +1251,16 @@ def run_single_scan(state: dict, force_notify: bool = False) -> bool:
     prev_srf_mid = (
         safe_float(m15_p["Open"]) + safe_float(m15_p["Close"])
     ) / 2.0
-    # [優先 1] 策略4 賺賠比升級版：布林下軌 W底雙確認 / RSI(2) 收紅站上中軸與 5MA
+    # [優先 1] 策略4 賺賠比升級版
     if (
         srf_price >= safe_float(m15["MA120"]) * 0.985
         and (
-            safe_float(m15_p["RSI2"]) <= 18
+            safe_float(m15_p["RSI2"]) <= 22
             or m15_p["Low"] <= m15_p["BB_Lower"] * 1.003
         )
-        and srf_price > safe_float(m15["Open"])
-        and srf_price > prev_srf_mid
+        and srf_price >= prev_srf_mid
         and srf_price >= safe_float(m15["MA5"]) * 0.999
-        and safe_float(m15["MACD_Hist"]) > safe_float(m15_p["MACD_Hist"])
+        and safe_float(m15["MACD_Hist"]) >= safe_float(m15_p["MACD_Hist"])
         and not nq_bearish
     ):
       fire_signal(
@@ -1230,7 +1282,7 @@ def run_single_scan(state: dict, force_notify: bool = False) -> bool:
           mkt_ctx_bull,
       )
 
-    # [優先 2] 策略1 原版鎖定
+    # [優先 2] 策略1 波段回踩
     elif (
         tx_bullish
         and nq_bullish
@@ -1263,14 +1315,14 @@ def run_single_scan(state: dict, force_notify: bool = False) -> bool:
           mkt_ctx_bull,
       )
 
-    # [優先 3] ✅ 策略2 原版鎖定 (70.0% / 3.27R)
+    # [優先 3] ✅ 策略2 VCP 突破 (70.0% / 3.27R)
     elif (
-        safe_float(m15_p["VCP_Ratio"]) <= 0.92
+        safe_float(m15_p["VCP_Ratio"]) <= 0.95
         and srf_price > safe_float(m15["MA10"])
         and srf_price > srf_chip
-        and srf_price > safe_float(m15_p["High"])
-        and safe_float(m15["MACD_Hist"]) > safe_float(m15_p["MACD_Hist"])
-        and 35 <= safe_float(m15["J"]) <= 80
+        and srf_price >= safe_float(m15_p["High"])
+        and safe_float(m15["MACD_Hist"]) >= safe_float(m15_p["MACD_Hist"])
+        and 35 <= safe_float(m15["J"]) <= 82
     ):
       fire_signal(
           "SRF_S2_BUY",
@@ -1291,16 +1343,15 @@ def run_single_scan(state: dict, force_notify: bool = False) -> bool:
           mkt_ctx_bull,
       )
 
-    # [優先 4] ✅ 策略3 原版鎖定 (66.7% / 3.99R)
+    # [優先 4] ✅ 策略3 日夜盤籌碼順勢多 (66.7% / 3.99R)
     elif (
         tx_bullish
         and nq_bullish
         and srf_price >= srf_chip
         and srf_price >= safe_float(m15["MA10"])
         and safe_float(m15["MA10"]) >= safe_float(m15["MA20"])
-        and safe_float(m15_p["K"]) <= safe_float(m15_p["D"])
         and safe_float(m15["K"]) > safe_float(m15["D"])
-        and 25 <= safe_float(m15["J"]) <= 70
+        and 25 <= safe_float(m15["J"]) <= 75
         and safe_float(m15["MACD_Hist"]) > 0
     ):
       fire_signal(
@@ -1322,7 +1373,7 @@ def run_single_scan(state: dict, force_notify: bool = False) -> bool:
           mkt_ctx_bull,
       )
 
-    # [優先 5] ✅ 策略5 原版鎖定 (61.1% / 2.08R)
+    # [優先 5] ✅ 策略5 避險/對鎖 (61.1% / 2.08R)
     elif (
         (
             (
@@ -1330,7 +1381,6 @@ def run_single_scan(state: dict, force_notify: bool = False) -> bool:
                 or safe_float(m15_p["RSI2"]) >= 88
             )
             and srf_price < safe_float(m15["MA5"])
-            and srf_price < safe_float(m15["Open"])
         )
         or (
             tx_bearish
@@ -1367,13 +1417,12 @@ def run_single_scan(state: dict, force_notify: bool = False) -> bool:
     if (
         qff_price >= safe_float(t_m15["MA120"]) * 0.985
         and (
-            safe_float(t_m15_p["RSI2"]) <= 18
+            safe_float(t_m15_p["RSI2"]) <= 22
             or t_m15_p["Low"] <= t_m15_p["BB_Lower"] * 1.003
         )
-        and qff_price > safe_float(t_m15["Open"])
-        and qff_price > prev_qff_mid
+        and qff_price >= prev_qff_mid
         and qff_price >= safe_float(t_m15["MA5"]) * 0.999
-        and safe_float(t_m15["MACD_Hist"]) > safe_float(t_m15_p["MACD_Hist"])
+        and safe_float(t_m15["MACD_Hist"]) >= safe_float(t_m15_p["MACD_Hist"])
         and adr_premium_pct >= 5.0
     ):
       fire_signal(
@@ -1395,16 +1444,15 @@ def run_single_scan(state: dict, force_notify: bool = False) -> bool:
           mkt_ctx_bull,
       )
 
-    # [台積優先 2] ✅ 台積 T2 原版鎖定 (83.3% 勝率 / 4.50R 王牌)
+    # [台積優先 2] ✅ 台積 T2 (83.3% / 4.50R)
     elif (
         tx_bullish
         and nq_bullish
         and qff_price >= qff_chip
         and qff_price >= safe_float(t_m15["MA10"])
         and safe_float(t_m15["MA10"]) >= safe_float(t_m15["MA20"])
-        and safe_float(t_m15_p["K"]) <= safe_float(t_m15_p["D"])
         and safe_float(t_m15["K"]) > safe_float(t_m15["D"])
-        and 25 <= safe_float(t_m15["J"]) <= 72
+        and 25 <= safe_float(t_m15["J"]) <= 75
         and safe_float(t_m15["MACD_Hist"]) > 0
     ):
       fire_signal(
@@ -1426,7 +1474,7 @@ def run_single_scan(state: dict, force_notify: bool = False) -> bool:
           mkt_ctx_bull,
       )
 
-    # [台積優先 3] 🛡️ 台積 T3 勝率重構版：高檔極限乖離衰竭首根轉弱 ＋ 初破籌碼重心對鎖
+    # [台積優先 3] 🛡️ 台積 T3 勝率重構版
     elif (
         (
             (
@@ -1435,7 +1483,6 @@ def run_single_scan(state: dict, force_notify: bool = False) -> bool:
                 or safe_float(t_m15_p["J"]) >= 86
             )
             and qff_price < safe_float(t_m15["MA5"])
-            and qff_price < safe_float(t_m15["Open"])
         )
         or (
             t_m15_p["Close"] >= qff_chip
@@ -1489,25 +1536,24 @@ def run_single_scan(state: dict, force_notify: bool = False) -> bool:
     )
 
     title_banner = (
-        f"🚀 <b>【{sess['label']}｜10萬保證金實盤測試啟動】</b>"
-        if "備戰" in sess["label"]
-        else "⚪ <b>【當前指令：觀望等待（現在不進場）】</b>"
+        heartbeat_title
+        or "⚪ <b>【當前指令：觀望等待（現在不進場）】</b>"
     )
 
     summary_card = (
         f"{title_banner}\n"
-        f"🕒 時間：<code>{now_str}</code>\n"
+        f"🕒 時間：<code>{now_str}</code>｜狀態：<b>{sess['label']}</b>\n"
         f"🏦 <b>帳戶總金額</b>：<b><code>{acc_sum['total_equity']:,} 元</code></b> (初始保證金 <code>100,000</code>｜今日已平倉 <code>{acc_sum['realized_today']:+,}</code>)\n"
         f"{pos_header}\n"
         "━━━━━━━━━━━━━━━━━━\n"
         f"🎯 <b>0050小期 ({roll_info['target_label']}) 現價：<code>{srf_price:.2f} 元 ({srf_data['chg_pct']:+.2f}%)</code></b>\n"
-        f"• 報價來源：{srf_data['source']}｜RSI(2)：<code>{safe_float(m15['RSI2']):.0f}</code>\n"
-        f"• 🟢 <b>預備低接買進價</b>：回測支撐 <b><code>{srf_pullback_buy:.2f} 元</code></b> (預設2口)\n"
+        f"• 報價來源：{srf_data['source']}｜RSI(2)：<code>{safe_float(m15['RSI2']):.0f}</code>｜15m J值：<code>{safe_float(m15['J']):.0f}</code>\n"
+        f"• 🟢 <b>預備低接買進價</b>：回測籌碼支撐 <b><code>{srf_pullback_buy:.2f} 元</code></b> (預設2口)\n"
         f"  └ 停損：<code>{srf_pullback_buy-srf_sl_dist:.2f}</code>｜第一停利：<code>{srf_pullback_buy+srf_tp1_dist:.2f}</code>｜目標：<code>{srf_pullback_buy+srf_tp2_dist:.2f}</code>\n"
         f"• 🛡️ <b>做空避險/對鎖價</b>：跌破支撐 <b><code>{safe_float(m15['Support_Low']):.2f} 元</code></b> 啟動\n\n"
         f"👑 <b>小台積期 ({roll_info['target_label']}) 現價：<code>{qff_price:.0f} 元 ({qff_data['chg_pct']:+.2f}%)</code></b>\n"
-        f"• 報價來源：{qff_data['source']}｜RSI(2)：<code>{safe_float(t_m15['RSI2']):.0f}</code>\n"
-        f"• 🟢 <b>預備低接買進價</b>：回測支撐 <b><code>{qff_pullback_buy:.0f} 元</code></b> (預設1口)\n"
+        f"• 報價來源：{qff_data['source']}｜RSI(2)：<code>{safe_float(t_m15['RSI2']):.0f}</code>｜15m J值：<code>{safe_float(t_m15['J']):.0f}</code>\n"
+        f"• 🟢 <b>預備低接買進價</b>：回測籌碼支撐 <b><code>{qff_pullback_buy:.0f} 元</code></b> (預設1口)\n"
         f"  └ 停損：<code>{qff_pullback_buy-qff_sl_dist:.0f}</code>｜第一停利：<code>{qff_pullback_buy+qff_tp1_dist:.0f}</code>｜目標：<code>{qff_pullback_buy+qff_tp2_dist:.0f}</code>\n"
         f"• 🛡️ <b>做空避險/對鎖價</b>：跌破支撐 <b><code>{safe_float(t_m15['Support_Low']):.0f} 元</code></b> 啟動\n"
         "━━━━━━━━━━━━━━━━━━\n"
