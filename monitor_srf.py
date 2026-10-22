@@ -3,6 +3,7 @@ from datetime import date, datetime
 import json
 import os
 import re
+import subprocess
 import time
 import traceback
 import numpy as np
@@ -11,15 +12,15 @@ import pytz
 import requests
 import yfinance as yf
 
-# ================= 1. 環境變數與高頻迴圈設定 =================
+# ================= 1. 環境變數與長駐高頻迴圈設定 =================
 TG_BOT_TOKEN = (os.environ.get("TG_BOT_TOKEN") or "").strip()
 TG_CHAT_ID = (os.environ.get("TG_CHAT_ID") or "").strip()
 FORCE_REPORT = (
     os.environ.get("FORCE_REPORT") or "false"
 ).strip().lower() == "true"
 
-POLL_INTERVAL_SEC = int(os.environ.get("POLL_INTERVAL_SEC", "30"))
-MAX_ITERATIONS = int(os.environ.get("MAX_ITERATIONS", "8"))
+POLL_INTERVAL_SEC = int(os.environ.get("POLL_INTERVAL_SEC", "25"))
+MAX_ITERATIONS = int(os.environ.get("MAX_ITERATIONS", "115"))
 
 TW_TZ = pytz.timezone("Asia/Taipei")
 STATE_FILE = "state.json"
@@ -86,6 +87,7 @@ def load_bot_state() -> dict:
           "night_standby_date": "",
           "night_open_1500_date": "",
           "last_hourly_heartbeat": "",
+          "last_startup_ping_ts": 0,
       },
       "intraday_bars": {"SRF": [], "QFF": [], "TXF": []},
       "day_close_anchor": {"SRF": 108.70, "QFF": 2431.0, "TXF": 47121.0},
@@ -106,7 +108,7 @@ def load_bot_state() -> dict:
               data[k] = default_state[k]
           for fk in default_state["daily_flags"]:
             if fk not in data["daily_flags"]:
-              data["daily_flags"][fk] = ""
+              data["daily_flags"][fk] = default_state["daily_flags"][fk]
         today_str = datetime.now(TW_TZ).strftime("%Y-%m-%d")
         if data["account"].get("today_date") != today_str:
           data["account"]["today_date"] = today_str
@@ -118,7 +120,7 @@ def load_bot_state() -> dict:
   return default_state
 
 
-def save_bot_state(state: dict):
+def save_bot_state(state: dict, git_sync: bool = False):
   try:
     now_ts = time.time()
     state["sent_signals"] = {
@@ -129,6 +131,17 @@ def save_bot_state(state: dict):
         state["intraday_bars"][k] = state["intraday_bars"][k][-180:]
     with open(STATE_FILE, "w", encoding="utf-8") as f:
       json.dump(state, f, ensure_ascii=False, indent=2)
+    # 若有新進出場訊號或重要帳務變更，立即同步至 GitHub (絕不加 [skip ci])
+    if git_sync:
+      subprocess.run(["git", "add", STATE_FILE], check=False)
+      res = subprocess.run(["git", "diff", "--cached", "--quiet"], check=False)
+      if res.returncode != 0:
+        subprocess.run(
+            ["git", "commit", "-m", "chore: sync realtime bot state"],
+            check=False,
+        )
+        subprocess.run(["git", "pull", "--rebase"], check=False)
+        subprocess.run(["git", "push"], check=False)
   except Exception as e:
     print(f"保存狀態檔異常: {e}")
 
@@ -222,14 +235,14 @@ def get_session_status(now_tw: datetime) -> dict:
   if 845 <= hm <= 1345:
     return {
         "mode": "DAY",
-        "label": "☀️ 早盤實時監控 (08:45-13:45)",
+        "label": "☀️ 早盤實時監控中 (每25秒掃描)",
         "can_run": True,
         "can_signal": True,
     }
   if 1346 <= hm <= 1424:
     return {
         "mode": "POST_DAY_REPORT",
-        "label": "📊 早盤收盤結算時段",
+        "label": "📊 早盤收盤結算與待命",
         "can_run": True,
         "can_signal": False,
     }
@@ -243,7 +256,7 @@ def get_session_status(now_tw: datetime) -> dict:
   if hm >= 1500 or hm <= 500:
     return {
         "mode": "NIGHT",
-        "label": "🌙 夜盤實時監控 (15:00-05:00)",
+        "label": "🌙 夜盤實時監控中 (每25秒掃描)",
         "can_run": True,
         "can_signal": True,
     }
@@ -583,7 +596,7 @@ def fetch_all_realtime_data(
   }
 
 
-# ================= 4. 核心除錯：期現貨基差自動平移對齊 K 線引擎 (徹底消除假性跳空與 RSI2 卡死 94！) =================
+# ================= 4. 徹底消除時區衝突與基差斷層之 K 線引擎 =================
 def build_realtime_df(
     base_symbol: str,
     interval: str,
@@ -591,12 +604,6 @@ def build_realtime_df(
     live_price: float,
     intraday_samples: list,
 ) -> pd.DataFrame:
-  """關鍵修復：
-
-  當現貨 K 線 (如昨日收 108.13 / 2415) 與 11 月期貨實時價 (如 109.90 / 2454) 存在跨夜盤漲幅或正逆價差時，
-  若只把最後一根 K 線的 Close 改成 109.90，會產生一根 +1.77 元的「假性巨量長紅」，導致 RSI(2) 永遠卡死在 94、且籌碼支撐停留在 108.13！
-  解法：自動計算期貨與現貨 K 線末端的基差偏移量 (basis_shift)，將歷史 K 線平滑對齊至期貨當前價格座標系，再接上盤中實時採樣 K 線！
-  """
   try:
     df = yf.Ticker(base_symbol).history(period=period, interval=interval)
     if df is None or df.empty:
@@ -605,10 +612,13 @@ def build_realtime_df(
       df.columns = df.columns.get_level_values(0)
     df = df.dropna(subset=["Open", "High", "Low", "Close"]).copy()
 
-    # 計算期貨實時價與現貨歷史 K 線末端的基差斷層，進行座標平移對齊
+    # 取得最後一根現貨 K 線的 UNIX 時間戳，並移除時區標籤以徹底杜絕 pytz / zoneinfo 合併衝突！
+    last_df_ts = df.index[-1].timestamp() if not df.empty else 0
+    df.index = pd.to_datetime(df.index).tz_localize(None)
+
+    # 基差自動平移校正 (消除期現貨正逆價差與跨夜盤假性跳空，防止 RSI2 卡死在 94)
     if live_price > 0 and not df.empty:
       last_spot_close = safe_float(df["Close"].iloc[-1], live_price)
-      # 若現貨 K 線最後一根與當前實時期貨價差距超過 0.25% (代表跨夜盤跳空或期現貨正逆價差)，將歷史序列平移對齊至期貨基準！
       anchor_first_live = (
           safe_float(intraday_samples[0]["p"], live_price)
           if intraday_samples
@@ -619,10 +629,9 @@ def build_realtime_df(
         for col in ["Open", "High", "Low", "Close"]:
           df[col] = df[col] + basis_shift
 
-    # 附加盤中每 30 秒實時採樣的期貨真實 K 線
+    # 附加盤中每 25 秒實時採樣的期貨 K 線
     if interval in ["5m", "15m"] and intraday_samples:
       bucket_sec = 300 if interval == "5m" else 900
-      last_df_ts = df.index[-1].timestamp() if not df.empty else 0
       grouped = {}
       for pt in intraday_samples:
         if pt["ts"] <= last_df_ts:
@@ -647,7 +656,7 @@ def build_realtime_df(
 
       if grouped:
         idx_list = [
-            datetime.fromtimestamp(b_ts, TW_TZ)
+            datetime.fromtimestamp(b_ts, TW_TZ).replace(tzinfo=None)
             for b_ts in sorted(grouped.keys())
         ]
         new_rows = [grouped[b_ts] for b_ts in sorted(grouped.keys())]
@@ -661,7 +670,8 @@ def build_realtime_df(
         df.iloc[-1, df.columns.get_loc("Low")] = live_price
 
     return add_indicators(df)
-  except Exception:
+  except Exception as e:
+    print(f"build_realtime_df ({base_symbol}) 異常: {e}")
     return pd.DataFrame()
 
 
@@ -1002,8 +1012,10 @@ def evaluate_urgent_exits(
   return urgent_cards
 
 
-# ================= 7. 單次全市場掃描與決策引擎 =================
-def run_single_scan(state: dict, force_notify: bool = False) -> bool:
+# ================= 7. 單次全市場掃描與 5m/15m 雙時框實時決策引擎 =================
+def run_single_scan(
+    state: dict, force_notify: bool = False, iter_idx: int = 0
+) -> bool:
   now_tw = datetime.now(TW_TZ)
   now_str = now_tw.strftime("%Y-%m-%d %H:%M:%S")
   today_str = now_tw.strftime("%Y-%m-%d")
@@ -1031,10 +1043,19 @@ def run_single_scan(state: dict, force_notify: bool = False) -> bool:
   )
 
   # =========================================================================
-  # ★ 全時段開盤與整點自動打卡報到機制 (確保早盤開盤、現貨開盤、14:00結算、夜盤開盤與每小時整點必有回報！)
+  # ★ 全時段開盤、整點與「啟動首輪」強制報到機制
   # =========================================================================
   flags = state.setdefault("daily_flags", {})
   heartbeat_title = None
+
+  # 若為手動啟動第 1 輪，或距離上次啟動回報超過 45 分鐘，立刻發送「常駐引擎啟動確認卡」
+  if iter_idx == 0 and (
+      force_notify
+      or (now_ts - safe_float(flags.get("last_startup_ping_ts"), 0)) >= 2700
+  ):
+    flags["last_startup_ping_ts"] = now_ts
+    force_notify = True
+    heartbeat_title = "🟢 <b>【常駐實時監控引擎已啟動！每 25 秒不間斷備戰中】</b>"
 
   # 1. 每日下午 13:50 ~ 14:25 自動發送「每日 14:00 早盤收盤帳務與持倉損益總結」
   if 1350 <= hm <= 1425 and flags.get("report_1400_date") != today_str:
@@ -1074,15 +1095,15 @@ def run_single_scan(state: dict, force_notify: bool = False) -> bool:
     force_notify = True
     heartbeat_title = "🌙 <b>【15:00 期貨夜盤正式開盤！實時監控啟動】</b>"
 
-  # 7. 盤中每小時整點自動平安打卡 (例如 10:00, 11:00, 12:00, 13:00, 16:00...)
+  # 7. 盤中每小時整點自動平安打卡
   elif (
       sess["can_signal"]
-      and (0 <= now_tw.minute <= 6)
+      and (0 <= now_tw.minute <= 5)
       and flags.get("last_hourly_heartbeat") != hour_key
   ):
     flags["last_hourly_heartbeat"] = hour_key
     force_notify = True
-    heartbeat_title = f"📡 <b>【{now_tw.hour:02d}:00 整點實時盯盤回報｜系統運作正常】</b>"
+    heartbeat_title = f"📡 <b>【{now_tw.hour:02d}:00 整點實時盯盤回報｜系統持續運轉中】</b>"
 
   if sess["can_signal"]:
     state["intraday_bars"].setdefault("SRF", []).append(
@@ -1095,11 +1116,18 @@ def run_single_scan(state: dict, force_notify: bool = False) -> bool:
         {"ts": now_ts, "p": tx_price}
     )
 
+  # 同時建立 15m 與 5m 實時 K 線，確保盤中短線與波段訊號皆能即時捕捉
   df_15m = build_realtime_df(
       "0050.TW", "15m", "30d", srf_price, state["intraday_bars"].get("SRF", [])
   )
+  df_5m = build_realtime_df(
+      "0050.TW", "5m", "5d", srf_price, state["intraday_bars"].get("SRF", [])
+  )
   tw2330_15m = build_realtime_df(
       "2330.TW", "15m", "30d", qff_price, state["intraday_bars"].get("QFF", [])
+  )
+  tw2330_5m = build_realtime_df(
+      "2330.TW", "5m", "5d", qff_price, state["intraday_bars"].get("QFF", [])
   )
   tx_15m = build_realtime_df(
       "^TWII", "15m", "30d", tx_price, state["intraday_bars"].get("TXF", [])
@@ -1113,6 +1141,10 @@ def run_single_scan(state: dict, force_notify: bool = False) -> bool:
 
   if df_15m.empty or tw2330_15m.empty or tx_15m.empty:
     return False
+  if df_5m.empty:
+    df_5m = df_15m
+  if tw2330_5m.empty:
+    tw2330_5m = tw2330_15m
 
   prev_tx = tx_daily.iloc[-2] if len(tx_daily) >= 2 else tx_daily.iloc[-1]
   H, L, C = (
@@ -1143,7 +1175,9 @@ def run_single_scan(state: dict, force_notify: bool = False) -> bool:
   tx_bearish = tx_price < tx_chip_poc and tx_price < tx_ma20
 
   m15, m15_p = df_15m.iloc[-1], df_15m.iloc[-2]
+  m5, m5_p = df_5m.iloc[-1], df_5m.iloc[-2]
   t_m15, t_m15_p = tw2330_15m.iloc[-1], tw2330_15m.iloc[-2]
+  t_m5, t_m5_p = tw2330_5m.iloc[-1], tw2330_5m.iloc[-2]
 
   opt = state.get("optimized_params", {})
   srf_atr = max(safe_float(m15["ATR"], 0.45), 0.40)
@@ -1251,16 +1285,19 @@ def run_single_scan(state: dict, force_notify: bool = False) -> bool:
     prev_srf_mid = (
         safe_float(m15_p["Open"]) + safe_float(m15_p["Close"])
     ) / 2.0
-    # [優先 1] 策略4 賺賠比升級版
+    # [優先 1] 策略4 賺賠比升級版 (支援 15m 或 5m 超賣收腳即時觸發)
     if (
         srf_price >= safe_float(m15["MA120"]) * 0.985
         and (
             safe_float(m15_p["RSI2"]) <= 22
+            or safe_float(m5_p["RSI2"]) <= 15
             or m15_p["Low"] <= m15_p["BB_Lower"] * 1.003
         )
-        and srf_price >= prev_srf_mid
-        and srf_price >= safe_float(m15["MA5"]) * 0.999
-        and safe_float(m15["MACD_Hist"]) >= safe_float(m15_p["MACD_Hist"])
+        and (
+            srf_price >= prev_srf_mid
+            or srf_price >= safe_float(m5["MA5"])
+        )
+        and safe_float(m5["MACD_Hist"]) >= safe_float(m5_p["MACD_Hist"])
         and not nq_bearish
     ):
       fire_signal(
@@ -1289,12 +1326,13 @@ def run_single_scan(state: dict, force_notify: bool = False) -> bool:
         and srf_price >= safe_float(m15["MA60"])
         and (
             m15_p["Low"] <= srf_chip * 1.004
-            or m15_p["Low"] <= safe_float(m15["MA20"]) * 1.004
+            or m5_p["Low"] <= srf_chip * 1.004
         )
         and srf_price >= srf_chip
-        and srf_price >= safe_float(m15["MA5"])
-        and safe_float(m15["K"]) >= safe_float(m15["D"])
-        and safe_float(m15["MACD_Hist"]) >= safe_float(m15_p["MACD_Hist"])
+        and (
+            safe_float(m15["K"]) >= safe_float(m15["D"])
+            or safe_float(m5["K"]) >= safe_float(m5["D"])
+        )
     ):
       fire_signal(
           "SRF_S1_BUY",
@@ -1317,12 +1355,14 @@ def run_single_scan(state: dict, force_notify: bool = False) -> bool:
 
     # [優先 3] ✅ 策略2 VCP 突破 (70.0% / 3.27R)
     elif (
-        safe_float(m15_p["VCP_Ratio"]) <= 0.95
+        safe_float(m15_p["VCP_Ratio"]) <= 0.96
         and srf_price > safe_float(m15["MA10"])
         and srf_price > srf_chip
-        and srf_price >= safe_float(m15_p["High"])
-        and safe_float(m15["MACD_Hist"]) >= safe_float(m15_p["MACD_Hist"])
-        and 35 <= safe_float(m15["J"]) <= 82
+        and (
+            srf_price >= safe_float(m15_p["High"])
+            or srf_price >= safe_float(m5_p["High"])
+        )
+        and 30 <= safe_float(m15["J"]) <= 84
     ):
       fire_signal(
           "SRF_S2_BUY",
@@ -1349,10 +1389,12 @@ def run_single_scan(state: dict, force_notify: bool = False) -> bool:
         and nq_bullish
         and srf_price >= srf_chip
         and srf_price >= safe_float(m15["MA10"])
-        and safe_float(m15["MA10"]) >= safe_float(m15["MA20"])
-        and safe_float(m15["K"]) > safe_float(m15["D"])
-        and 25 <= safe_float(m15["J"]) <= 75
-        and safe_float(m15["MACD_Hist"]) > 0
+        and (
+            safe_float(m15["K"]) > safe_float(m15["D"])
+            or safe_float(m5["K"]) > safe_float(m5["D"])
+        )
+        and 25 <= safe_float(m15["J"]) <= 78
+        and safe_float(m15["MACD_Hist"]) >= 0
     ):
       fire_signal(
           "SRF_S3_BUY",
@@ -1418,11 +1460,14 @@ def run_single_scan(state: dict, force_notify: bool = False) -> bool:
         qff_price >= safe_float(t_m15["MA120"]) * 0.985
         and (
             safe_float(t_m15_p["RSI2"]) <= 22
+            or safe_float(t_m5_p["RSI2"]) <= 15
             or t_m15_p["Low"] <= t_m15_p["BB_Lower"] * 1.003
         )
-        and qff_price >= prev_qff_mid
-        and qff_price >= safe_float(t_m15["MA5"]) * 0.999
-        and safe_float(t_m15["MACD_Hist"]) >= safe_float(t_m15_p["MACD_Hist"])
+        and (
+            qff_price >= prev_qff_mid
+            or qff_price >= safe_float(t_m5["MA5"])
+        )
+        and safe_float(t_m5["MACD_Hist"]) >= safe_float(t_m5_p["MACD_Hist"])
         and adr_premium_pct >= 5.0
     ):
       fire_signal(
@@ -1450,10 +1495,12 @@ def run_single_scan(state: dict, force_notify: bool = False) -> bool:
         and nq_bullish
         and qff_price >= qff_chip
         and qff_price >= safe_float(t_m15["MA10"])
-        and safe_float(t_m15["MA10"]) >= safe_float(t_m15["MA20"])
-        and safe_float(t_m15["K"]) > safe_float(t_m15["D"])
-        and 25 <= safe_float(t_m15["J"]) <= 75
-        and safe_float(t_m15["MACD_Hist"]) > 0
+        and (
+            safe_float(t_m15["K"]) > safe_float(t_m15["D"])
+            or safe_float(t_m5["K"]) > safe_float(t_m5["D"])
+        )
+        and 25 <= safe_float(t_m15["J"]) <= 78
+        and safe_float(t_m15["MACD_Hist"]) >= 0
     ):
       fire_signal(
           "QFF_T2_BUY",
@@ -1513,6 +1560,7 @@ def run_single_scan(state: dict, force_notify: bool = False) -> bool:
   # ================= 8. 推播輸出 =================
   if cards_to_send:
     send_tg_message("\n\n".join(cards_to_send))
+    save_bot_state(state, git_sync=True)
   elif force_notify:
     acc_sum = compute_account_summary(state, srf_price, qff_price)
     pos_header = (
@@ -1537,7 +1585,7 @@ def run_single_scan(state: dict, force_notify: bool = False) -> bool:
 
     title_banner = (
         heartbeat_title
-        or "⚪ <b>【當前指令：觀望等待（現在不進場）】</b>"
+        or "⚪ <b>【當前指令：觀望等待（每25秒常駐監控中）】</b>"
     )
 
     summary_card = (
@@ -1548,23 +1596,25 @@ def run_single_scan(state: dict, force_notify: bool = False) -> bool:
         "━━━━━━━━━━━━━━━━━━\n"
         f"🎯 <b>0050小期 ({roll_info['target_label']}) 現價：<code>{srf_price:.2f} 元 ({srf_data['chg_pct']:+.2f}%)</code></b>\n"
         f"• 報價來源：{srf_data['source']}｜RSI(2)：<code>{safe_float(m15['RSI2']):.0f}</code>｜15m J值：<code>{safe_float(m15['J']):.0f}</code>\n"
-        f"• 🟢 <b>預備低接買進價</b>：回測籌碼支撐 <b><code>{srf_pullback_buy:.2f} 元</code></b> (預設2口)\n"
-        f"  └ 停損：<code>{srf_pullback_buy-srf_sl_dist:.2f}</code>｜第一停利：<code>{srf_pullback_buy+srf_tp1_dist:.2f}</code>｜目標：<code>{srf_pullback_buy+srf_tp2_dist:.2f}</code>\n"
+        f"• 🟢 <b>低接買點</b>：回測支撐 <b><code>{srf_pullback_buy:.2f} 元</code></b>｜🚀 <b>順勢/突破買點</b>：站穩籌碼重心 <b><code>{srf_chip:.2f} 元</code></b>\n"
+        f"  └ 對應停損：<code>{srf_price-srf_sl_dist:.2f}</code>｜第一停利：<code>{srf_price+srf_tp1_dist:.2f}</code>｜目標：<code>{srf_price+srf_tp2_dist:.2f}</code>\n"
         f"• 🛡️ <b>做空避險/對鎖價</b>：跌破支撐 <b><code>{safe_float(m15['Support_Low']):.2f} 元</code></b> 啟動\n\n"
         f"👑 <b>小台積期 ({roll_info['target_label']}) 現價：<code>{qff_price:.0f} 元 ({qff_data['chg_pct']:+.2f}%)</code></b>\n"
         f"• 報價來源：{qff_data['source']}｜RSI(2)：<code>{safe_float(t_m15['RSI2']):.0f}</code>｜15m J值：<code>{safe_float(t_m15['J']):.0f}</code>\n"
-        f"• 🟢 <b>預備低接買進價</b>：回測籌碼支撐 <b><code>{qff_pullback_buy:.0f} 元</code></b> (預設1口)\n"
-        f"  └ 停損：<code>{qff_pullback_buy-qff_sl_dist:.0f}</code>｜第一停利：<code>{qff_pullback_buy+qff_tp1_dist:.0f}</code>｜目標：<code>{qff_pullback_buy+qff_tp2_dist:.0f}</code>\n"
+        f"• 🟢 <b>低接買點</b>：回測支撐 <b><code>{qff_pullback_buy:.0f} 元</code></b>｜🚀 <b>順勢/突破買點</b>：站穩籌碼重心 <b><code>{qff_chip:.0f} 元</code></b>\n"
+        f"  └ 對應停損：<code>{qff_price-qff_sl_dist:.0f}</code>｜第一停利：<code>{qff_price+qff_tp1_dist:.0f}</code>｜目標：<code>{qff_price+qff_tp2_dist:.0f}</code>\n"
         f"• 🛡️ <b>做空避險/對鎖價</b>：跌破支撐 <b><code>{safe_float(t_m15['Support_Low']):.0f} 元</code></b> 啟動\n"
         "━━━━━━━━━━━━━━━━━━\n"
         f"🧭 <b>小那(NQ)</b>：<code>{nq_price:.0f} ({nq_chg_pct:+.2f}%)</code>｜<b>TSM溢價</b>：<code>{adr_premium_pct:+.1f}%</code>\n"
         f"📊 <b>台指({tx_price:.0f})位階</b>：支撐 <code>{S1}</code> / 樞紐 <code>{P}</code> / 籌碼重心 <code>{tx_chip_poc}</code> / 壓力 <code>{R1}</code>"
     )
     send_tg_message(summary_card)
+    save_bot_state(state, git_sync=False)
   else:
     print(
-        f"[{now_str}] ({sess['label']}) SRF={srf_price:.2f} |"
-        f" QFF={qff_price:.0f} | TX={tx_price:.0f}"
+        f"[{now_str}] 第 {iter_idx+1}/{MAX_ITERATIONS} 輪"
+        f" ({sess['label']}) | SRF={srf_price:.2f}(籌碼{srf_chip:.2f}) |"
+        f" QFF={qff_price:.0f}(籌碼{qff_chip:.0f}) | TX={tx_price:.0f}"
     )
 
   state_after = json.dumps(state, sort_keys=True)
@@ -1575,27 +1625,30 @@ def main():
   state = load_bot_state()
   state_changed = False
   try:
-    if FORCE_REPORT:
-      if run_single_scan(state, force_notify=True):
-        state_changed = True
-    else:
-      for i in range(MAX_ITERATIONS):
-        now_tw = datetime.now(TW_TZ)
-        sess = get_session_status(now_tw)
-        if sess["can_run"]:
-          try:
-            if run_single_scan(state, force_notify=False):
-              state_changed = True
-          except Exception as e:
-            print(f"單輪掃描例外: {e}")
-            traceback.print_exc()
-        else:
-          break
-        if i < MAX_ITERATIONS - 1:
-          time.sleep(POLL_INTERVAL_SEC)
+    for i in range(MAX_ITERATIONS):
+      now_tw = datetime.now(TW_TZ)
+      sess = get_session_status(now_tw)
+      # 第 1 輪若為手動觸發 (FORCE_REPORT=True)，即使休市也強制跑 1 次發送診斷卡
+      if sess["can_run"] or (i == 0 and FORCE_REPORT):
+        try:
+          is_force = FORCE_REPORT and (i == 0)
+          if run_single_scan(state, force_notify=is_force, iter_idx=i):
+            state_changed = True
+            save_bot_state(state, git_sync=False)
+        except Exception as e:
+          print(f"單輪掃描例外: {e}")
+          traceback.print_exc()
+      else:
+        print(f"[{now_tw.strftime('%H:%M:%S')}] {sess['label']}，結束常駐迴圈。")
+        break
+
+      if not sess["can_run"]:
+        break
+      if i < MAX_ITERATIONS - 1:
+        time.sleep(POLL_INTERVAL_SEC)
   finally:
     if state_changed:
-      save_bot_state(state)
+      save_bot_state(state, git_sync=True)
 
 
 if __name__ == "__main__":
