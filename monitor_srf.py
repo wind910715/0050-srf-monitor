@@ -118,8 +118,14 @@ def load_bot_state() -> dict:
           data["account"]["today_realized_pnl"] = 0
           data["account"]["closed_trades_today"] = []
         return data
-    except Exception:
-      pass
+    except Exception as e:
+      # 損壞的 state.json 絕不可無聲重置 (會讓整本帳本/持倉憑空消失):
+      # 先把損壞檔備份起來供人工還原, 再以預設狀態啟動並大聲告警。
+      print(f"⚠️ state.json 讀取失敗 ({e})！已備份損壞檔, 以預設狀態啟動, 請人工檢查帳本！")
+      try:
+        os.replace(STATE_FILE, STATE_FILE + ".corrupt")
+      except Exception:
+        pass
   return default_state
 
 
@@ -132,8 +138,11 @@ def save_bot_state(state: dict, git_sync: bool = False):
     for k in ["SRF", "QFF", "TXF"]:
       if k in state.get("intraday_bars", {}):
         state["intraday_bars"][k] = state["intraday_bars"][k][-180:]
-    with open(STATE_FILE, "w", encoding="utf-8") as f:
+    # 原子寫入: 先寫暫存檔再 rename, 避免程序中途被殺造成 state.json 截斷損毀。
+    tmp_path = STATE_FILE + ".tmp"
+    with open(tmp_path, "w", encoding="utf-8") as f:
       json.dump(state, f, ensure_ascii=False, indent=2)
+    os.replace(tmp_path, STATE_FILE)
     if git_sync:
       subprocess.run(["git", "add", STATE_FILE], check=False)
       res = subprocess.run(["git", "diff", "--cached", "--quiet"], check=False)
@@ -142,8 +151,15 @@ def save_bot_state(state: dict, git_sync: bool = False):
             ["git", "commit", "-m", "chore: sync realtime bot state"],
             check=False,
         )
-        subprocess.run(["git", "pull", "--rebase"], check=False)
-        subprocess.run(["git", "push"], check=False)
+        # Actions 環境是 detached HEAD, 裸 pull/push 一定失敗 (不在分支上);
+        # 有 GITHUB_REF_NAME 時明確指定遠端分支, 否則維持舊行為。
+        ref = (os.environ.get("GITHUB_REF_NAME") or "").strip()
+        if ref:
+          subprocess.run(["git", "pull", "--rebase", "origin", ref], check=False)
+          subprocess.run(["git", "push", "origin", f"HEAD:{ref}"], check=False)
+        else:
+          subprocess.run(["git", "pull", "--rebase"], check=False)
+          subprocess.run(["git", "push"], check=False)
   except Exception as e:
     print(f"保存狀態檔異常: {e}")
 
@@ -1208,6 +1224,8 @@ def run_single_scan(
   if tw2330_5m.empty:
     tw2330_5m = tw2330_15m
 
+  if tx_daily.empty:
+    return False
   prev_tx = tx_daily.iloc[-2] if len(tx_daily) >= 2 else tx_daily.iloc[-1]
   H, L, C = (
       safe_float(prev_tx["High"]),
@@ -1299,7 +1317,17 @@ def run_single_scan(
     pos_dir = "BUY" if mode_type == "BUY" else "SELL"
     port_dir = get_portfolio_dir()
 
-    if mode_type != "HEDGE_LOCK":
+    # 對鎖 (HEDGE_LOCK) 的標的是「另一月份合約」, 帳本同商品只有單一部位欄位:
+    # 若該商品已有部位, 直接覆寫會讓原部位損益無聲消失。已有空單就跳過;
+    # 已有多單時只推播對鎖警示卡, 不動帳本部位 (對鎖由使用者手動在另一月份執行)。
+    hedge_alert_only = False
+    if mode_type == "HEDGE_LOCK":
+      existing = state["positions"].get(asset)
+      if existing is not None:
+        if existing.get("dir") == "SELL":
+          return
+        hedge_alert_only = True
+    else:
       if state["positions"].get(asset) is not None:
         return
       if port_dir is not None and port_dir != pos_dir:
@@ -1310,17 +1338,18 @@ def run_single_scan(
     strat_label = cfg.get("algo_label", default_strat_name)
 
     state["sent_signals"][sig_key] = now_ts
-    state["positions"][asset] = {
-        "dir": pos_dir,
-        "lots": lots,
-        "entry": entry_p,
-        "sl": sl_p,
-        "tp1": tp1_p,
-        "tp2": tp2_p,
-        "ts": now_ts,
-        "strategy": strat_label,
-        "tp1_hit": False,
-    }
+    if not hedge_alert_only:
+      state["positions"][asset] = {
+          "dir": pos_dir,
+          "lots": lots,
+          "entry": entry_p,
+          "sl": sl_p,
+          "tp1": tp1_p,
+          "tp2": tp2_p,
+          "ts": now_ts,
+          "strategy": strat_label,
+          "tp1_hit": False,
+      }
     acc_summary = compute_account_summary(state, srf_price, qff_price)
     card = format_intuitive_entry_card(
         mode_type,
@@ -1679,8 +1708,16 @@ def run_single_scan(
 def main():
   state = load_bot_state()
   state_changed = False
+  # 時間預算: 單輪掃描含 ~20 次外部請求, 實測遠超過 POLL_INTERVAL_SEC;
+  # 115 輪絕對超過 workflow 的 60 分鐘 timeout 而被硬殺 (finally 未必跑完)。
+  # 以牆鐘預算主動收尾, 確保狀態正常存檔後再結束, 讓接力棒乾淨交棒。
+  MAX_RUNTIME_SEC = int(os.environ.get("MAX_RUNTIME_SEC", "3000"))
+  start_ts = time.time()
   try:
     for i in range(MAX_ITERATIONS):
+      if i > 0 and (time.time() - start_ts) >= MAX_RUNTIME_SEC:
+        print(f"⏱ 已達 {MAX_RUNTIME_SEC} 秒時間預算, 主動結束常駐迴圈。")
+        break
       now_tw = datetime.now(TW_TZ)
       sess = get_session_status(now_tw)
       if sess["can_run"] or (i == 0 and FORCE_REPORT):
