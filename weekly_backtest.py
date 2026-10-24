@@ -204,150 +204,118 @@ def check_locked_signal(
   return None
 
 
-def simulate_locked_champion(
+# =========================================================================
+# 對齊版出場引擎 (2026-10-24): 與 monitor_srf.py evaluate_urgent_exits 一致。
+# 實盤規則: TP1 首次觸發只把停損移至 entry ± 0.30*TP1_dist (不減碼);
+# 觸及 TP2 或停損線 (原始或上移後) 即全數平倉, 損益 = 實際價差 - 手續費 (50 元/口)。
+# 無 MA runner、無動能停滯出場、無時間出場、無部分平倉、無虧損夾限。
+# 殘差揭露: 實盤 25 秒輪詢 vs 回測 15 分 K——同根 K 內先後觸及停損與停利時,
+# 回測採保守順序 (停損優先); 進場價取訊號 K 收盤 (實盤為觸發當下價)。
+# =========================================================================
+LIVE_DIST = {
+    "SRF": {"atr_floor": 0.35, "tick": 0.05, "sl_min": 0.50, "tp1_min": 0.45, "tp2_min": 1.50, "fee_pts": 0.05},
+    "QFF": {"atr_floor": 12.0, "tick": 5.0, "sl_min": 20.0, "tp1_min": 20.0, "tp2_min": 55.0, "fee_pts": 0.50},
+}
+
+
+def _live_dists(asset: str, atr: float, sl_mult: float, tp1_mult: float, tp2_mult: float):
+  cfg = LIVE_DIST[asset]
+  a = max(float(atr), cfg["atr_floor"])
+  tick = cfg["tick"]
+
+  def rnd(x: float) -> float:
+    return round(x / tick) * tick
+
+  return (
+      max(rnd(a * sl_mult), cfg["sl_min"]),
+      max(rnd(a * tp1_mult), cfg["tp1_min"]),
+      max(rnd(a * tp2_mult), cfg["tp2_min"]),
+  )
+
+
+def simulate_live_exit(
     df: pd.DataFrame,
+    signal_fn,
     algo_id: str,
     algo_label: str,
     param_val: float,
-    sl_atr_mult: float,
-    tp1_atr_mult: float,
-    tp2_atr_mult: float,
-    hold_bars: int = 28,
+    asset: str,
+    sl_mult: float = 1.25,
+    tp1_mult: float = 1.05,
+    tp2_mult: float = 3.50,
 ) -> dict:
-  wins, losses = 0, 0
-  win_pts_sum, loss_pts_sum = 0.0, 0.0
+  """與實盤一致的出場模擬。sl/tp mult 預設為實盤值, 僅供優化評估傳入變體。"""
+  cfg = LIVE_DIST[asset]
+  wins = losses = censored = 0
+  win_pts_sum = loss_pts_sum = 0.0
   i = 30
-  while i < len(df) - hold_bars:
+  while i < len(df) - 1:
     row = df.iloc[i]
     prev = df.iloc[i - 1]
-    direction = check_locked_signal(row, prev, algo_id, param_val)
-
-    if direction:
-      entry = float(row["Close"])
-      base_atr = max(float(row["ATR"]), entry * 0.0045)
-      if direction == "BUY":
-        struct_dist = max(
-            entry - min(float(row["Low"]), float(prev["Low"])) + 0.15 * base_atr,
-            0.85 * base_atr,
-        )
-      else:
-        struct_dist = max(
-            max(float(row["High"]), float(prev["High"])) - entry + 0.15 * base_atr,
-            0.85 * base_atr,
-        )
-      sl_dist = min(base_atr * sl_atr_mult, struct_dist * 1.15)
-      tp1_dist = max(base_atr * tp1_atr_mult, sl_dist * 1.15)
-      tp2_dist = max(base_atr * tp2_atr_mult, sl_dist * 2.60)
-
-      tp1_hit = False
-      max_fav = 0.0
-      trade_pnl = None
-
-      for step_idx, j in enumerate(range(i + 1, min(i + hold_bars, len(df)))):
-        b = df.iloc[j]
-        hi, lo, cl = float(b["High"]), float(b["Low"]), float(b["Close"])
-        if direction == "BUY":
-          fav = hi - entry
-          max_fav = max(max_fav, fav)
-          if not tp1_hit:
-            if hi >= entry + tp1_dist:
-              tp1_hit = True
-            elif lo <= entry - sl_dist:
-              trade_pnl = -sl_dist
-              break
-            elif (
-                step_idx >= 5
-                and cl < min(float(row["Low"]), float(prev["Low"]))
-            ):
-              trade_pnl = max(cl - entry, -0.55 * sl_dist)
-              break
-          if tp1_hit:
-            if hi >= entry + tp2_dist:
-              trade_pnl = 0.25 * tp1_dist + 0.75 * tp2_dist
-              break
-            if (
-                step_idx >= 4
-                and cl < float(b["MA10"])
-                and max_fav >= 1.4 * tp1_dist
-            ):
-              runner = max(0.75 * max_fav, 1.15 * tp1_dist)
-              trade_pnl = 0.25 * tp1_dist + 0.75 * runner
-              break
-            elif lo <= entry + 0.30 * tp1_dist and step_idx >= 6:
-              runner = max(0.65 * max_fav, 0.85 * tp1_dist)
-              trade_pnl = 0.25 * tp1_dist + 0.75 * runner
-              break
-        else:
-          fav = entry - lo
-          max_fav = max(max_fav, fav)
-          if not tp1_hit:
-            if lo <= entry - tp1_dist:
-              tp1_hit = True
-            elif hi >= entry + sl_dist:
-              trade_pnl = -sl_dist
-              break
-            elif (
-                step_idx >= 5
-                and cl > max(float(row["High"]), float(prev["High"]))
-            ):
-              trade_pnl = max(entry - cl, -0.55 * sl_dist)
-              break
-          if tp1_hit:
-            if lo <= entry - tp2_dist:
-              trade_pnl = 0.25 * tp1_dist + 0.75 * tp2_dist
-              break
-            if (
-                step_idx >= 4
-                and cl > float(b["MA10"])
-                and max_fav >= 1.4 * tp1_dist
-            ):
-              runner = max(0.75 * max_fav, 1.15 * tp1_dist)
-              trade_pnl = 0.25 * tp1_dist + 0.75 * runner
-              break
-            elif hi >= entry - 0.30 * tp1_dist and step_idx >= 6:
-              runner = max(0.65 * max_fav, 0.85 * tp1_dist)
-              trade_pnl = 0.25 * tp1_dist + 0.75 * runner
-              break
-
-      if trade_pnl is None:
-        end_c = float(df.iloc[min(i + hold_bars - 1, len(df) - 1)]["Close"])
-        raw_diff = (end_c - entry) if direction == "BUY" else (entry - end_c)
-        if tp1_hit:
-          runner = max(raw_diff, 0.70 * max_fav, 0.90 * tp1_dist)
-          trade_pnl = 0.25 * tp1_dist + 0.75 * runner
-        else:
-          trade_pnl = (
-              raw_diff if raw_diff > 0 else max(raw_diff, -0.60 * sl_dist)
-          )
-
-      if abs(trade_pnl) < 1e-4:
-        i += 4
-        continue
-      if trade_pnl > 0:
-        wins += 1
-        win_pts_sum += trade_pnl
-      else:
-        losses += 1
-        loss_pts_sum += abs(trade_pnl)
-      i += 6
-    else:
+    direction = signal_fn(row, prev, algo_id, param_val)
+    if not direction:
       i += 1
+      continue
+    entry = float(row["Close"])
+    sl_dist, tp1_dist, tp2_dist = _live_dists(
+        asset, float(row["ATR"]), sl_mult, tp1_mult, tp2_mult
+    )
+    if direction == "BUY":
+      sl_line = entry - sl_dist
+      tp1 = entry + tp1_dist
+      tp2 = entry + tp2_dist
+    else:
+      sl_line = entry + sl_dist
+      tp1 = entry - tp1_dist
+      tp2 = entry - tp2_dist
+    tp1_hit = False
+    trade_pnl = None
+    exit_j = None
+    for j in range(i + 1, len(df)):
+      b = df.iloc[j]
+      hi, lo = float(b["High"]), float(b["Low"])
+      if direction == "BUY":
+        if lo <= sl_line:
+          trade_pnl = sl_line - entry
+          exit_j = j
+          break
+        if hi >= tp2:
+          trade_pnl = tp2 - entry
+          exit_j = j
+          break
+        if not tp1_hit and hi >= tp1:
+          tp1_hit = True
+          sl_line = round(entry + 0.30 * tp1_dist, 2)
+      else:
+        if hi >= sl_line:
+          trade_pnl = entry - sl_line
+          exit_j = j
+          break
+        if lo <= tp2:
+          trade_pnl = entry - tp2
+          exit_j = j
+          break
+        if not tp1_hit and lo <= tp1:
+          tp1_hit = True
+          sl_line = round((entry - 0.30 * tp1_dist) / 5) * 5 if asset == "QFF" else round(entry - 0.30 * tp1_dist, 2)
+    if trade_pnl is None:
+      censored += 1
+      break
+    trade_pnl -= cfg["fee_pts"]
+    if trade_pnl > 0:
+      wins += 1
+      win_pts_sum += trade_pnl
+    else:
+      losses += 1
+      loss_pts_sum += abs(trade_pnl)
+    i = exit_j + 1
 
   total = wins + losses
   wr = (wins / total * 100.0) if total > 0 else 0.0
   avg_w = (win_pts_sum / wins) if wins > 0 else 0.0
-  avg_l = (
-      (loss_pts_sum / losses)
-      if losses > 0
-      else (df["Close"].iloc[-1] * 0.0035)
-  )
-  rr = (avg_w / max(avg_l, 1e-4)) if avg_l > 0 else 0.0
+  avg_l = (loss_pts_sum / losses) if losses > 0 else 0.0
+  rr = (avg_w / avg_l) if avg_l > 0 else 0.0
   net_pts = win_pts_sum - loss_pts_sum
-  score = (
-      5000.0 + wr * 20.0 + min(rr, 4.0) * 600.0
-      if (total >= 4 and wr >= 58.0 and rr >= 1.5)
-      else (wr * 8.0 + rr * 100.0)
-  )
   return {
       "algo_id": algo_id,
       "algo_label": algo_label,
@@ -356,28 +324,27 @@ def simulate_locked_champion(
       "win_rate": round(wr, 1),
       "rr": round(min(rr, 4.5), 2),
       "net_pts": round(net_pts, 2),
-      "score": score,
+      "censored": censored,
+      "sample_ok": total >= 30,
+      "score": net_pts,
       "enabled": True,
       "params": {
           "param_val": param_val,
-          "sl_atr": sl_atr_mult,
-          "tp1_atr": tp1_atr_mult,
-          "tp2_atr": tp2_atr_mult,
+          "sl_mult": sl_mult,
+          "tp1_mult": tp1_mult,
+          "tp2_mult": tp2_mult,
+          "asset": asset,
       },
   }
 
 
-def run_locked_slot(df: pd.DataFrame, candidates: list) -> dict:
+def run_locked_slot(df: pd.DataFrame, candidates: list, asset: str) -> dict:
   best_res = None
   for algo_id, algo_label, param_list in candidates:
     for p_val in param_list:
-      for sl_m in [1.1, 1.4, 1.8]:
-        for tp1_m, tp2_m in [(1.0, 2.8), (1.3, 3.4), (1.6, 4.2)]:
-          res = simulate_locked_champion(
-              df, algo_id, algo_label, p_val, sl_m, tp1_m, tp2_m, 28
-          )
-          if best_res is None or res["score"] > best_res["score"]:
-            best_res = res
+      res = simulate_live_exit(df, check_locked_signal, algo_id, algo_label, p_val, asset)
+      if best_res is None or res["net_pts"] > best_res["net_pts"]:
+        best_res = res
   return best_res
 
 
@@ -442,186 +409,13 @@ def check_targeted_upgrade_signal(
   return None
 
 
-def simulate_targeted_upgrade(
-    df: pd.DataFrame,
-    algo_id: str,
-    algo_label: str,
-    param_val: float,
-    sl_atr_mult: float,
-    tp1_atr_mult: float,
-    tp2_atr_mult: float,
-    hold_bars: int = 30,
-) -> dict:
-  """針對台積 T1、台積 T3 與 0050 策略4 的「勝率 ≥ 63% 且 賺賠比 ≥ 1.85R」專屬模擬引擎：
-
-  - 透過結構緊湊停損 (1.15 ~ 1.40 ATR) 加上 5 根 K 線動能停滯微損撤退 (-0.38 SL)，將平均虧損壓到最小。
-  - 觸及 TP1 (0.90 ~ 1.15 ATR) 立刻鎖定勝場 (平倉 20%)，剩餘 80% 主力部位延後出場直到跌破 MA20，將賺賠比推升至 2.0R~2.8R！
-  """
-  wins, losses = 0, 0
-  win_pts_sum, loss_pts_sum = 0.0, 0.0
-  i = 30
-  while i < len(df) - hold_bars:
-    row = df.iloc[i]
-    prev = df.iloc[i - 1]
-    direction = check_targeted_upgrade_signal(row, prev, algo_id, param_val)
-
-    if direction:
-      entry = float(row["Close"])
-      base_atr = max(float(row["ATR"]), entry * 0.0042)
-      sl_dist = base_atr * sl_atr_mult
-      tp1_dist = base_atr * tp1_atr_mult
-      tp2_dist = base_atr * tp2_atr_mult
-
-      tp1_hit = False
-      max_fav = 0.0
-      trade_pnl = None
-
-      for step_idx, j in enumerate(range(i + 1, min(i + hold_bars, len(df)))):
-        b = df.iloc[j]
-        hi, lo, cl = float(b["High"]), float(b["Low"]), float(b["Close"])
-
-        if direction == "BUY":
-          fav = hi - entry
-          max_fav = max(max_fav, fav)
-          if not tp1_hit:
-            if hi >= entry + tp1_dist:
-              tp1_hit = True
-            elif lo <= entry - sl_dist:
-              trade_pnl = -sl_dist
-              break
-            # 若 5 根 K 線未達 TP1 且跌破前根低點，提早於 -0.38 * sl_dist 微損出場 (大幅縮小分母拉高 R 值！)
-            elif (
-                step_idx >= 5
-                and cl < entry
-                and cl < float(b["MA10"])
-                and b["K"] < b["D"]
-            ):
-              trade_pnl = max(cl - entry, -0.38 * sl_dist)
-              break
-          if tp1_hit:
-            if hi >= entry + tp2_dist:
-              trade_pnl = 0.20 * tp1_dist + 0.80 * tp2_dist
-              break
-            if (
-                step_idx >= 5
-                and cl < float(b["MA20"])
-                and max_fav >= 1.8 * tp1_dist
-            ):
-              runner = max(0.82 * max_fav, 1.65 * tp1_dist)
-              trade_pnl = 0.20 * tp1_dist + 0.80 * runner
-              break
-            elif lo <= entry + 0.25 * tp1_dist and step_idx >= 8:
-              runner = max(0.75 * max_fav, 1.35 * tp1_dist)
-              trade_pnl = 0.20 * tp1_dist + 0.80 * runner
-              break
-        else:  # SELL (台積 T3 避險/對鎖)
-          fav = entry - lo
-          max_fav = max(max_fav, fav)
-          if not tp1_hit:
-            if lo <= entry - tp1_dist:
-              tp1_hit = True
-            elif hi >= entry + sl_dist:
-              trade_pnl = -sl_dist
-              break
-            elif (
-                step_idx >= 5
-                and cl > entry
-                and cl > float(b["MA10"])
-                and b["K"] > b["D"]
-            ):
-              trade_pnl = max(entry - cl, -0.38 * sl_dist)
-              break
-          if tp1_hit:
-            if lo <= entry - tp2_dist:
-              trade_pnl = 0.20 * tp1_dist + 0.80 * tp2_dist
-              break
-            if (
-                step_idx >= 5
-                and cl > float(b["MA20"])
-                and max_fav >= 1.8 * tp1_dist
-            ):
-              runner = max(0.82 * max_fav, 1.65 * tp1_dist)
-              trade_pnl = 0.20 * tp1_dist + 0.80 * runner
-              break
-            elif hi >= entry - 0.25 * tp1_dist and step_idx >= 8:
-              runner = max(0.75 * max_fav, 1.35 * tp1_dist)
-              trade_pnl = 0.20 * tp1_dist + 0.80 * runner
-              break
-
-      if trade_pnl is None:
-        end_c = float(df.iloc[min(i + hold_bars - 1, len(df) - 1)]["Close"])
-        raw_diff = (end_c - entry) if direction == "BUY" else (entry - end_c)
-        if tp1_hit:
-          runner = max(raw_diff, 0.80 * max_fav, 1.50 * tp1_dist)
-          trade_pnl = 0.20 * tp1_dist + 0.80 * runner
-        else:
-          trade_pnl = (
-              raw_diff if raw_diff > 0 else max(raw_diff, -0.40 * sl_dist)
-          )
-
-      if abs(trade_pnl) < 1e-4:
-        i += 4
-        continue
-      if trade_pnl > 0:
-        wins += 1
-        win_pts_sum += trade_pnl
-      else:
-        losses += 1
-        loss_pts_sum += abs(trade_pnl)
-      i += 6
-    else:
-      i += 1
-
-  total = wins + losses
-  wr = (wins / total * 100.0) if total > 0 else 0.0
-  avg_w = (win_pts_sum / wins) if wins > 0 else 0.0
-  avg_l = (
-      (loss_pts_sum / losses)
-      if losses > 0
-      else (df["Close"].iloc[-1] * 0.003)
-  )
-  rr = (avg_w / max(avg_l, 1e-4)) if avg_l > 0 else 0.0
-  net_pts = win_pts_sum - loss_pts_sum
-
-  if total < 5 or net_pts <= 0:
-    score = -9999.0 + net_pts
-  elif wr >= 62.0 and rr >= 1.85:
-    score = 12000.0 + wr * 40.0 + min(rr, 4.0) * 1000.0
-  elif wr >= 60.0 and rr >= 1.55:
-    score = 8000.0 + wr * 30.0 + min(rr, 4.0) * 800.0
-  else:
-    score = wr * 12.0 + rr * 200.0
-
-  return {
-      "algo_id": algo_id,
-      "algo_label": algo_label,
-      "total": total,
-      "wins": wins,
-      "win_rate": round(wr, 1),
-      "rr": round(min(rr, 4.5), 2),
-      "net_pts": round(net_pts, 2),
-      "score": score,
-      "enabled": True,
-      "params": {
-          "param_val": param_val,
-          "sl_atr": sl_atr_mult,
-          "tp1_atr": tp1_atr_mult,
-          "tp2_atr": tp2_atr_mult,
-      },
-  }
-
-
-def run_targeted_slot(df: pd.DataFrame, candidates: list) -> dict:
+def run_targeted_slot(df: pd.DataFrame, candidates: list, asset: str) -> dict:
   best_res = None
   for algo_id, algo_label, param_list in candidates:
     for p_val in param_list:
-      for sl_m in [1.15, 1.35, 1.60]:
-        for tp1_m, tp2_m in [(0.85, 3.0), (1.0, 3.6), (1.15, 4.2)]:
-          res = simulate_targeted_upgrade(
-              df, algo_id, algo_label, p_val, sl_m, tp1_m, tp2_m, 30
-          )
-          if best_res is None or res["score"] > best_res["score"]:
-            best_res = res
+      res = simulate_live_exit(df, check_targeted_upgrade_signal, algo_id, algo_label, p_val, asset)
+      if best_res is None or res["net_pts"] > best_res["net_pts"]:
+        best_res = res
   return best_res
 
 
@@ -637,6 +431,7 @@ def run_weekly_report():
           ("SNIPER_VWAP_PULLBACK", "外資VWAP籌碼首回測確認", [30, 38, 45]),
           ("SNIPER_MA20_GOLD_PULLBACK", "多頭月線回踩金叉確認", [40, 48, 55]),
       ],
+      "SRF",
   )
   s2 = run_locked_slot(
       df_0050,
@@ -644,16 +439,18 @@ def run_weekly_report():
           ("MINERVINI_VCP_POCKET", "Minervini VCP口袋支點", [72, 80, 88]),
           ("CLASSIC_PIVOT_BREAK", "經典箱頂突破", [75, 82, 88]),
       ],
+      "SRF",
   )
   s3 = run_locked_slot(
-      df_0050, [("SNIPER_CHIP_MOMENTUM", "日夜盤籌碼順勢共振多", [55, 65, 72])]
+      df_0050, [("SNIPER_CHIP_MOMENTUM", "日夜盤籌碼順勢共振多", [55, 65, 72])], "SRF"
   )
   s5_hedge = run_locked_slot(
       df_0050,
       [("HYBRID_EXHAUST_HEDGE", "極限乖離衰竭+破籌碼對鎖", [82, 88, 92])],
+      "SRF",
   )
   t2 = run_locked_slot(
-      df_2330, [("SNIPER_CHIP_MOMENTUM", "日夜盤籌碼順勢共振多", [55, 65, 72])]
+      df_2330, [("SNIPER_CHIP_MOMENTUM", "日夜盤籌碼順勢共振多", [55, 65, 72])], "QFF"
   )
 
   # 2. 專項升級：小台積電 T1 (拉高賺賠比)、小台積電 T3 (解決勝率低)、小 0050 策略4 (拉高賺賠比)
@@ -661,12 +458,13 @@ def run_weekly_report():
       ("UPGRADE_RSI2_SWING", "Connors RSI(2)極限收腳確認", [10, 14, 18, 22]),
       ("UPGRADE_BB_W_BOTTOM", "布林下軌W底雙確認", [18, 24, 30]),
   ]
-  t1 = run_targeted_slot(df_2330, left_upgrade_cands)
+  t1 = run_targeted_slot(df_2330, left_upgrade_cands, "QFF")
   t3_hedge = run_targeted_slot(
       df_2330,
       [("UPGRADE_TSMC_CLIMAX_HEDGE", "高檔極限衰竭+初破籌碼對鎖", [82, 86, 90])],
+      "QFF",
   )
-  s4 = run_targeted_slot(df_0050, left_upgrade_cands)
+  s4 = run_targeted_slot(df_0050, left_upgrade_cands, "SRF")
 
   state = {}
   if os.path.exists(STATE_FILE):
@@ -697,13 +495,19 @@ def run_weekly_report():
     print(f"⚠️ 寫入 state.json 失敗: {e}")
 
   def fmt_line(idx_icon: str, title: str, r: dict, mult: int) -> str:
+    if not r.get("sample_ok"):
+      tag = "⚠️樣本不足(n<30)，僅參考"
+    elif r.get("net_pts", 0) <= 0:
+      tag = "⚠️誠實回測為負，建議停用"
+    else:
+      tag = "✅啟用"
     return (
-        f"{idx_icon} <b>{title}【勝出：{r['algo_label']}】(✅啟用)</b>：\n"
+        f"{idx_icon} <b>{title}【勝出：{r['algo_label']}】({tag})</b>：\n"
         f"   • 勝率：<b><code>{r['win_rate']:.1f}%</code></b> ({r['wins']}勝/{r['total']}次)｜賺賠比：<b><code>{r['rr']:.2f}R</code></b>｜累計：<b><code>{r['net_pts']*mult:+,.0f}元/口</code></b>"
     )
 
   msg = (
-      "🏆 <b>【專項調優完成！台積T1/T3 &amp; 0050策略4 升級回測報告】</b>\n"
+      "🏆 <b>【回測口徑對齊完成！實盤出場口徑誠實回測報告】</b>\n"
       f"🕒 統計時間：<code>{now_str}</code>\n"
       "━━━━━━━━━━━━━━━━━━\n"
       "👑 <b>【小台積電期貨 (QFF) 實盤回測】</b>\n"
@@ -718,9 +522,9 @@ def run_weekly_report():
       f"{fmt_line('4️⃣', '策略3 日夜盤順勢 (原版鎖定)', s3, 1000)}\n"
       f"{fmt_line('5️⃣', '🛡️ 策略5 避險/對鎖 (原版鎖定)', s5_hedge, 1000)}\n"
       "━━━━━━━━━━━━━━━━━━\n"
-      "✅ <b>專項優化總結</b>：\n"
-      "1. <b>台積 T1 &amp; 0050 策略4</b>：透過緊湊結構停損與 80% 主力倉延後出場，賺賠比顯著拉升！\n"
-      "2. <b>台積 T3 避險</b>：改採「高檔極限乖離衰竭＋初破籌碼重心」，消除滯後追空，勝率大幅翻升！"
+      "✅ <b>口徑說明</b>：\n"
+      "1. 出場已與實盤對齊：TP1 只移停損不減碼、無 MA runner／動能停滯／時間出場、虧損不夾限、每筆扣 50 元手續費。\n"
+      "2. 優勝者以淨值選出，不再用勝率／RR 加權分數與停損／停利網格篩選；n&lt;30 的槽位僅參考，不建議直接啟用。"
   )
   send_tg_message(msg)
 
