@@ -18,12 +18,12 @@
     "day_standby_date": "2026-10-23",
     "day_open_0845_date": "2026-10-23",
     "spot_open_0900_date": "2026-10-23",
-    "report_1400_date": "2026-10-23",
+    "report_1400_date": "2026-10-24",
     "night_standby_date": "",
     "night_open_1500_date": "2026-10-23",
     "night_srf_open_1725_date": "2026-10-23",
     "last_hourly_heartbeat": "2026-10-24_05",
-    "last_startup_ping_ts": 1792789383.8114252
+    "last_startup_ping_ts": 1792821567.611547
   },
   "intraday_bars": {
     "SRF": [
@@ -1472,10 +1472,6 @@
     ],
     "TXF": [
       {
-        "ts": 1792783634.943629,
-        "p": 45654.0
-      },
-      {
         "ts": 1792783667.6576836,
         "p": 45654.0
       },
@@ -2190,6 +2186,10 @@
       {
         "ts": 1792789383.8114252,
         "p": 45654.0
+      },
+      {
+        "ts": 1792821567.611547,
+        "p": 45654.0
       }
     ]
   },
@@ -2245,22 +2245,25 @@
   },
   "active_contract_ym": "",
   "optimized_params": {
-    "updated_at": "2026-10-22 08:37",
+    "updated_at": "2026-10-24 13:59",
     "SRF_S4": {
       "algo_id": "UPGRADE_RSI2_SWING",
       "algo_label": "Connors RSI(2)極限收腳確認",
-      "total": 36,
-      "wins": 15,
-      "win_rate": 41.7,
-      "rr": 3.46,
-      "net_pts": 8.71,
-      "score": 1192.029950977421,
+      "total": 37,
+      "wins": 19,
+      "win_rate": 51.4,
+      "rr": 1.13,
+      "net_pts": 1.93,
+      "censored": 0,
+      "sample_ok": true,
+      "score": 1.930007629394531,
       "enabled": true,
       "params": {
-        "param_val": 10,
-        "sl_atr": 1.15,
-        "tp1_atr": 1.15,
-        "tp2_atr": 4.2
+        "param_val": 18,
+        "sl_mult": 1.25,
+        "tp1_mult": 1.05,
+        "tp2_mult": 3.5,
+        "asset": "SRF"
       }
     },
     "SRF_S1": {
@@ -2269,117 +2272,138 @@
       "total": 9,
       "wins": 3,
       "win_rate": 33.3,
-      "rr": 3.09,
-      "net_pts": 1.37,
-      "score": 575.2964448339658,
+      "rr": 2.64,
+      "net_pts": 1.05,
+      "censored": 0,
+      "sample_ok": false,
+      "score": 1.0499999999999998,
       "enabled": true,
       "params": {
         "param_val": 45,
-        "sl_atr": 1.1,
-        "tp1_atr": 1.6,
-        "tp2_atr": 4.2
+        "sl_mult": 1.25,
+        "tp1_mult": 1.05,
+        "tp2_mult": 3.5,
+        "asset": "SRF"
       }
     },
     "SRF_S2": {
       "algo_id": "MINERVINI_VCP_POCKET",
       "algo_label": "Minervini VCP口袋支點",
-      "total": 10,
-      "wins": 7,
-      "win_rate": 70.0,
-      "rr": 3.26,
-      "net_pts": 8.53,
-      "score": 8356.510224947175,
+      "total": 9,
+      "wins": 5,
+      "win_rate": 55.6,
+      "rr": 1.21,
+      "net_pts": 1.55,
+      "censored": 0,
+      "sample_ok": false,
+      "score": 1.5499999999999856,
       "enabled": true,
       "params": {
         "param_val": 72,
-        "sl_atr": 1.4,
-        "tp1_atr": 1.6,
-        "tp2_atr": 4.2
+        "sl_mult": 1.25,
+        "tp1_mult": 1.05,
+        "tp2_mult": 3.5,
+        "asset": "SRF"
       }
     },
     "SRF_S3": {
       "algo_id": "SNIPER_CHIP_MOMENTUM",
       "algo_label": "日夜盤籌碼順勢共振多",
-      "total": 6,
-      "wins": 4,
-      "win_rate": 66.7,
-      "rr": 3.87,
-      "net_pts": 5.38,
-      "score": 8656.611872064608,
+      "total": 5,
+      "wins": 3,
+      "win_rate": 60.0,
+      "rr": 2.64,
+      "net_pts": 3.25,
+      "censored": 0,
+      "sample_ok": false,
+      "score": 3.2499999999999996,
       "enabled": true,
       "params": {
         "param_val": 72,
-        "sl_atr": 1.1,
-        "tp1_atr": 1.6,
-        "tp2_atr": 4.2
+        "sl_mult": 1.25,
+        "tp1_mult": 1.05,
+        "tp2_mult": 3.5,
+        "asset": "SRF"
       }
     },
     "SRF_HEDGE": {
       "algo_id": "HYBRID_EXHAUST_HEDGE",
       "algo_label": "極限乖離衰竭+破籌碼對鎖",
-      "total": 36,
-      "wins": 21,
-      "win_rate": 58.3,
-      "rr": 2.28,
-      "net_pts": 14.53,
-      "score": 7533.975269181424,
+      "total": 30,
+      "wins": 20,
+      "win_rate": 66.7,
+      "rr": 1.18,
+      "net_pts": 7.49,
+      "censored": 0,
+      "sample_ok": true,
+      "score": 7.489995422363273,
       "enabled": true,
       "params": {
         "param_val": 92,
-        "sl_atr": 1.1,
-        "tp1_atr": 1.6,
-        "tp2_atr": 4.2
+        "sl_mult": 1.25,
+        "tp1_mult": 1.05,
+        "tp2_mult": 3.5,
+        "asset": "SRF"
       }
     },
     "QFF_T1": {
-      "algo_id": "UPGRADE_RSI2_SWING",
-      "algo_label": "Connors RSI(2)極限收腳確認",
-      "total": 41,
-      "wins": 21,
-      "win_rate": 51.2,
-      "rr": 1.72,
-      "net_pts": 150.29,
-      "score": 957.9197956093865,
+      "algo_id": "UPGRADE_BB_W_BOTTOM",
+      "algo_label": "布林下軌W底雙確認",
+      "total": 17,
+      "wins": 8,
+      "win_rate": 47.1,
+      "rr": 1.16,
+      "net_pts": 6.5,
+      "censored": 0,
+      "sample_ok": false,
+      "score": 6.5,
       "enabled": true,
       "params": {
-        "param_val": 22,
-        "sl_atr": 1.15,
-        "tp1_atr": 0.85,
-        "tp2_atr": 3.0
+        "param_val": 18,
+        "sl_mult": 1.25,
+        "tp1_mult": 1.05,
+        "tp2_mult": 3.5,
+        "asset": "QFF"
       }
     },
     "QFF_T2": {
       "algo_id": "SNIPER_CHIP_MOMENTUM",
       "algo_label": "日夜盤籌碼順勢共振多",
-      "total": 6,
-      "wins": 4,
-      "win_rate": 66.7,
-      "rr": 1.62,
-      "net_pts": 74.12,
-      "score": 7305.13266716516,
+      "total": 8,
+      "wins": 6,
+      "win_rate": 75.0,
+      "rr": 0.62,
+      "net_pts": 39.0,
+      "censored": 0,
+      "sample_ok": false,
+      "score": 39.0,
       "enabled": true,
       "params": {
-        "param_val": 65,
-        "sl_atr": 1.1,
-        "tp1_atr": 1.6,
-        "tp2_atr": 4.2
+        "param_val": 72,
+        "sl_mult": 1.25,
+        "tp1_mult": 1.05,
+        "tp2_mult": 3.5,
+        "asset": "QFF"
       }
     },
     "QFF_HEDGE": {
       "algo_id": "UPGRADE_TSMC_CLIMAX_HEDGE",
       "algo_label": "高檔極限衰竭+初破籌碼對鎖",
-      "total": 57,
-      "wins": 29,
-      "win_rate": 50.9,
-      "rr": 2.03,
-      "net_pts": 280.6,
-      "score": 1016.0034300974025,
+      "total": 31,
+      "wins": 17,
+      "win_rate": 54.8,
+      "rr": 0.65,
+      "net_pts": -60.5,
+      "censored": 0,
+      "sample_ok": true,
+      "score": -60.5,
       "enabled": true,
       "params": {
         "param_val": 82,
-        "sl_atr": 1.15,
-        "tp1_atr": 0.85,
-        "tp2_atr": 3.0
+        "sl_mult": 1.25,
+        "tp1_mult": 1.05,
+        "tp2_mult": 3.5,
+        "asset": "QFF"
       }
     }
   }
