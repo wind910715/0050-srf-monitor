@@ -70,7 +70,9 @@ jobs:
         run: python monitor_srf.py
 
       - name: Persist Position & Account State (No skip-ci)
-        if: always() && github.event.schedule != '0 1 * * 6'
+        # 原本週六回測排程被排除在外, 導致週六 weekly_backtest 算出的 optimized_params
+        # 只存在 job 的臨時工作區、從未 commit 回 repo, 實盤 bot 永遠吃不到週六優化結果。
+        if: always()
         run: |
           if [ -f state.json ]; then
             git add state.json
