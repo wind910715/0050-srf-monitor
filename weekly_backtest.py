@@ -688,10 +688,13 @@ def run_weekly_report():
       "QFF_HEDGE": t3_hedge,
   }
   try:
-    with open(STATE_FILE, "w", encoding="utf-8") as f:
+    # 原子寫入: 避免寫到一半被中斷造成 state.json 截斷。
+    tmp_path = STATE_FILE + ".tmp"
+    with open(tmp_path, "w", encoding="utf-8") as f:
       json.dump(state, f, ensure_ascii=False, indent=2)
-  except Exception:
-    pass
+    os.replace(tmp_path, STATE_FILE)
+  except Exception as e:
+    print(f"⚠️ 寫入 state.json 失敗: {e}")
 
   def fmt_line(idx_icon: str, title: str, r: dict, mult: int) -> str:
     return (
