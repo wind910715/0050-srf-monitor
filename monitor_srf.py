@@ -26,6 +26,30 @@ TW_TZ = pytz.timezone("Asia/Taipei")
 STATE_FILE = "state.json"
 SIGNAL_COOLDOWN_SEC = 900  # 同一策略 15 分鐘冷卻
 
+# ================= 2026-10-27 重構：分層＋分欄位＋優先序（REFACTOR_PLAN_2026-10-27.md） =================
+# 部位結構：positions[asset] = {"swing": pos|None, "daytrade": pos|None, "hedge": pos|None}
+# 波段進場優先序（初版，待回測驗證）：SRF: S3→S1→S2→S4；QFF: T2→T1；對鎖獨立欄位。
+# 出場優先序：硬停損 > 當沖收盤強制出場 > 波段 TP2 全出 > TP1 分批＋移動停利 > 對鎖。
+# 波段：SL 1.25 ATR、TP1 2.0 ATR（出一半＋剩餘移保本）、TP2 3.5 ATR。
+# 當沖：SL 1.0 ATR、TP1 1.5 ATR 全出、TP2 2.5 ATR、收盤強制出場為硬規則。
+# 開盤緩衝（提案二選一，選「第一根 5m 收盤確認」）：開盤後 5 分鐘內（日盤 08:45-08:50、
+# 夜盤 17:25-17:30）不觸發硬停損，TP／強制出場不受影響。
+SWING_PRIORITY = {
+    "SRF": ["SRF_S3_BUY", "SRF_S1_BUY", "SRF_S2_BUY", "SRF_S4_BUY"],
+    "QFF": ["QFF_T2_BUY", "QFF_T1_BUY"],
+}
+SWING_PRIORITY_NUM = {
+    "SRF_S3_BUY": "P1", "SRF_S1_BUY": "P2", "SRF_S2_BUY": "P3", "SRF_S4_BUY": "P4",
+    "QFF_T2_BUY": "P1", "QFF_T1_BUY": "P2",
+}
+SWING_TP1_MULT = 2.0
+DAYTRADE_SL_MULT = 1.0
+DAYTRADE_TP1_MULT = 1.5
+DAYTRADE_TP2_MULT = 2.5
+OPEN_BUFFER_WINDOWS = [(845, 850), (1725, 1730)]  # (hm 起, hm 迄)：開盤後 5 分鐘不觸發硬停損
+DAYTRADE_FORCE_CLOSE_DAY_HM = 1325   # 日盤當沖單 13:25 起強制出場（13:30 前出清）
+DAYTRADE_FORCE_CLOSE_NIGHT_HM = 455  # 夜盤當沖單 04:55 起強制出場（05:00 前出清）
+
 # 更新版本號：自動清除 105.05 假持倉，重新以 100,000 元乾淨帳本啟動！
 ACCOUNT_RESET_VERSION = "2026-10-22_1815_PURE_TAIFEX_MIS"
 INITIAL_CAPITAL = 100000
@@ -66,11 +90,56 @@ def safe_round(val, digits: int = 0, default: float = 0.0):
   return int(round(v)) if digits == 0 else round(v, digits)
 
 
+def migrate_positions(positions) -> dict:
+  """舊格式 positions[asset] 為單一部位 dict 時，自動轉換為三欄位格式。
+
+  規則：策略名含「對鎖」者進 hedge 欄位，其餘進 swing 欄位；
+  保留原有 entry/sl/tp1/tp2/tp1_hit，並補 pos_type/priority/session/
+  sl_dist/tp1_dist/tp2_dist/closed_lots/realized_partial 欄位。
+  已是新格式者只補預設欄位，不動既有部位。
+  """
+  new_positions = {}
+  for asset in ["SRF", "QFF"]:
+    old = positions.get(asset) if isinstance(positions, dict) else None
+    slots = {"swing": None, "daytrade": None, "hedge": None}
+    if isinstance(old, dict) and old.get("dir"):
+      strat = str(old.get("strategy", ""))
+      slot = "hedge" if "對鎖" in strat else "swing"
+      pos = dict(old)
+      pos["pos_type"] = slot
+      pos["priority"] = "H" if slot == "hedge" else None
+      pos["session"] = None
+      pos.setdefault("closed_lots", 0)
+      pos.setdefault("realized_partial", 0)
+      entry_p = safe_float(pos.get("entry"), 0.0)
+      pos["sl_dist"] = abs(entry_p - safe_float(pos.get("sl"), entry_p))
+      pos["tp1_dist"] = abs(safe_float(pos.get("tp1"), entry_p) - entry_p)
+      pos["tp2_dist"] = abs(safe_float(pos.get("tp2"), entry_p) - entry_p)
+      slots[slot] = pos
+    elif isinstance(old, dict):
+      for s in ["swing", "daytrade", "hedge"]:
+        p = old.get(s)
+        if isinstance(p, dict) and p.get("dir"):
+          p.setdefault("pos_type", s)
+          p.setdefault("priority", "H" if s == "hedge" else None)
+          p.setdefault("session", None)
+          p.setdefault("closed_lots", 0)
+          p.setdefault("realized_partial", 0)
+          entry_p = safe_float(p.get("entry"), 0.0)
+          p.setdefault("sl_dist", abs(entry_p - safe_float(p.get("sl"), entry_p)))
+          p.setdefault("tp1_dist", abs(safe_float(p.get("tp1"), entry_p) - entry_p))
+          p.setdefault("tp2_dist", abs(safe_float(p.get("tp2"), entry_p) - entry_p))
+          slots[s] = p
+    new_positions[asset] = slots
+  return new_positions
+
+
 def load_bot_state() -> dict:
   default_state = {
       "account_version": ACCOUNT_RESET_VERSION,
       "sent_signals": {},
-      "positions": {"SRF": None, "QFF": None},
+      "positions": {"SRF": {"swing": None, "daytrade": None, "hedge": None},
+                    "QFF": {"swing": None, "daytrade": None, "hedge": None}},
       "account": {
           "initial_capital": INITIAL_CAPITAL,
           "realized_pnl": 0,
@@ -112,6 +181,8 @@ def load_bot_state() -> dict:
           for fk in default_state["daily_flags"]:
             if fk not in data["daily_flags"]:
               data["daily_flags"][fk] = default_state["daily_flags"][fk]
+          # 舊格式部位自動遷移為三欄位（對鎖→hedge、其餘→swing），現有模擬倉不得無聲消失
+          data["positions"] = migrate_positions(data.get("positions", {}))
         today_str = datetime.now(TW_TZ).strftime("%Y-%m-%d")
         if data["account"].get("today_date") != today_str:
           data["account"]["today_date"] = today_str
@@ -833,18 +904,24 @@ def compute_account_summary(
       ("SRF", srf_price, 1000, ".2f", "0050小期(SRF)"),
       ("QFF", qff_price, 100, ".0f", "小台積期(QFF)"),
   ]:
-    pos = state["positions"].get(asset)
-    if pos and cur_p > 0:
-      lots = int(pos.get("lots", 1))
-      entry_p = safe_float(pos.get("entry"), cur_p)
-      d_type = pos.get("dir", "BUY")
-      diff = (cur_p - entry_p) if d_type == "BUY" else (entry_p - cur_p)
-      u_pnl = int(round(diff * mult * lots))
-      unrealized_total += u_pnl
-      d_str = "🟢多單" if d_type == "BUY" else "🔴空單/避險"
-      open_details.append(
-          f"• <b>{name}</b>：{d_str} <b><code>{lots} 口</code></b>｜進場 <code>{entry_p:{fmt}}</code> ➔ 現價 <code>{cur_p:{fmt}}</code> (浮動損益 <b><code>{u_pnl:+,} 元</code></b>)"
-      )
+    slots = state["positions"].get(asset) or {}
+    if isinstance(slots, dict) and slots.get("dir"):
+      slots = migrate_positions(state["positions"]).get(asset, {})
+    for slot_name, slot_label in [
+        ("swing", "波段"), ("daytrade", "當沖"), ("hedge", "對鎖"),
+    ]:
+      pos = slots.get(slot_name) if isinstance(slots, dict) else None
+      if pos and cur_p > 0:
+        lots = int(pos.get("lots", 1))
+        entry_p = safe_float(pos.get("entry"), cur_p)
+        d_type = pos.get("dir", "BUY")
+        diff = (cur_p - entry_p) if d_type == "BUY" else (entry_p - cur_p)
+        u_pnl = int(round(diff * mult * lots))
+        unrealized_total += u_pnl
+        d_str = "🟢多單" if d_type == "BUY" else "🔴空單/避險"
+        open_details.append(
+            f"• <b>{name}</b>【{slot_label}】：{d_str} <b><code>{lots} 口</code></b>｜進場 <code>{entry_p:{fmt}}</code> ➔ 現價 <code>{cur_p:{fmt}}</code> (浮動損益 <b><code>{u_pnl:+,} 元</code></b>)"
+        )
 
   total_equity = init_cap + realized_total + unrealized_total
   roi_pct = (total_equity - init_cap) / init_cap * 100.0
@@ -955,6 +1032,82 @@ def format_intuitive_entry_card(
   )
 
 
+
+
+
+def _pos_attr(pos: dict, p_fmt: str) -> str:
+  """平倉記錄歸因欄：[策略|類型|優先序|SL距|TP1距|TP2距]。"""
+  strat = pos.get("strategy", "")
+  ptype = pos.get("pos_type", "")
+  pri = pos.get("priority") or "—"
+  sl_d = safe_float(pos.get("sl_dist"), 0.0)
+  t1_d = safe_float(pos.get("tp1_dist"), 0.0)
+  t2_d = safe_float(pos.get("tp2_dist"), 0.0)
+  return (
+      f"[{strat}|{ptype}|{pri}|SL{sl_d:{p_fmt}}|"
+      f"TP1 {t1_d:{p_fmt}}|TP2 {t2_d:{p_fmt}}]"
+  )
+
+
+def _book_full_close(
+    state: dict,
+    asset: str,
+    slot_name: str,
+    pos: dict,
+    cur_p: float,
+    unit_mult: int,
+    p_fmt: str,
+    label: str,
+    tag: str,
+    now_str: str,
+) -> int:
+  """全數平倉剩餘口數：結算損益（已含 TP1 分批已實現）、計數、寫平倉記錄、清欄位。
+
+  回傳本筆總淨損益（含 TP1 分批部分）。一部位只計一筆交易，勝負以總淨損益判定。
+  """
+  acc = state["account"]
+  lots = int(pos.get("lots", 1))
+  entry_p = safe_float(pos.get("entry"), cur_p)
+  direction = pos.get("dir", "BUY")
+  diff = (cur_p - entry_p) if direction == "BUY" else (entry_p - cur_p)
+  final_pnl = int(round(diff * unit_mult * lots)) - 50 * lots
+  total_net = int(pos.get("realized_partial", 0)) + final_pnl
+  acc["realized_pnl"] += final_pnl
+  acc["today_realized_pnl"] += final_pnl
+  acc["total_trades_count"] += 1
+  if total_net > 0:
+    acc["win_trades_count"] += 1
+  total_lots = int(pos.get("closed_lots", 0)) + lots
+  partial_note = "（含 TP1 分批）" if pos.get("realized_partial") else ""
+  acc["closed_trades_today"].append(
+      f"• [{now_str}] <b>{label}</b> ({total_lots}口) {tag}{partial_note} {_pos_attr(pos, p_fmt)}："
+      f"<code>{entry_p:{p_fmt}} ➔ {cur_p:{p_fmt}}</code> (損益 <b><code>{total_net:+,} 元</code></b>)"
+  )
+  state["positions"][asset][slot_name] = None
+  return total_net
+
+
+def _daytrade_close_card(title: str, label: str, lots: int, cur_p: float,
+                         p_fmt: str, entry_p: float, total_net: int,
+                         new_eq: int) -> str:
+  return (
+      f"{title}\n"
+      f"📌 <b>商品</b>：<b>{label} (共 {lots} 口)</b>\n"
+      "━━━━━━━━━━━━━━━━━━\n"
+      f"👉 <b>現在立刻平倉價</b>：<b><code>{cur_p:{p_fmt}} 元</code></b> <i>(進場成本 {entry_p:{p_fmt}} 元)</i>\n"
+      f"💰 <b>本筆平倉損益</b>：<b><code>{total_net:+,} 元</code></b>\n"
+      f"🏦 <b>平倉後帳戶總金額</b>：<b><code>{new_eq:,} 元</code></b>"
+  )
+
+
+def _parse_hm(now_str: str) -> int:
+  try:
+    parts = now_str.split(":")
+    return int(parts[0]) * 100 + int(parts[1])
+  except Exception:
+    return -1
+
+
 def evaluate_urgent_exits(
     state: dict,
     srf_price: float,
@@ -962,8 +1115,23 @@ def evaluate_urgent_exits(
     roll_info: dict,
     now_str: str,
 ) -> list:
+  """出場引擎（2026-10-27 重構版）。
+
+  出場優先序（同一價位多條件同時觸發時）：硬停損 > 當沖收盤強制出場 >
+  波段 TP2 全出 > TP1 分批＋移動停利（波段出一半＋剩餘移保本；當沖 TP1 全出）。
+  開盤緩衝：開盤後 5 分鐘內（日盤 08:45-08:50、夜盤 17:25-17:30）不觸發硬停損，
+  TP／強制出場不受影響。對鎖欄位出場規則與波段相同。
+  """
   urgent_cards = []
   acc = state["account"]
+  hm = _parse_hm(now_str)
+  open_buffer = any(s <= hm < e for s, e in OPEN_BUFFER_WINDOWS)
+  if 845 <= hm <= 1345:
+    cur_session = "day"
+  elif hm >= 1725 or hm <= 500:
+    cur_session = "night"
+  else:
+    cur_session = None
 
   for asset, cur_p, unit_mult, p_fmt, label in [
       ("SRF", srf_price, 1000, ".2f", f"0050小期 (SRF {roll_info['target_label']})"),
@@ -971,108 +1139,149 @@ def evaluate_urgent_exits(
   ]:
     if cur_p <= 0:
       continue
-    pos = state["positions"].get(asset)
-    if not pos:
-      continue
+    slots = state["positions"].get(asset) or {}
+    if isinstance(slots, dict) and slots.get("dir"):
+      slots = migrate_positions(state["positions"]).get(asset, {})
+      state["positions"][asset] = slots
+    for slot_name in ["swing", "daytrade", "hedge"]:
+      pos = slots.get(slot_name) if isinstance(slots, dict) else None
+      if not pos:
+        continue
+      pos_type = pos.get("pos_type", slot_name)
+      direction = pos.get("dir", "BUY")
+      lots = int(pos.get("lots", 1))
+      entry_p = safe_float(pos.get("entry"), cur_p)
+      sl_p = safe_float(pos.get("sl"), cur_p)
+      tp1_p = safe_float(pos.get("tp1"), cur_p)
+      tp2_p = safe_float(pos.get("tp2"), cur_p)
+      tp1_hit = pos.get("tp1_hit", False)
 
-    direction = pos.get("dir", "BUY")
-    lots = int(pos.get("lots", 1))
-    entry_p = safe_float(pos.get("entry"), cur_p)
-    sl_p = safe_float(pos.get("sl"), cur_p)
-    tp1_p = safe_float(pos.get("tp1"), cur_p)
-    tp2_p = safe_float(pos.get("tp2"), cur_p)
-    tp1_hit = pos.get("tp1_hit", False)
-
-    pnl_per_unit = (
-        (cur_p - entry_p) if direction == "BUY" else (entry_p - cur_p)
-    )
-    fee_cost = 50 * lots
-    net_pnl_ntd = int(round(pnl_per_unit * unit_mult * lots)) - fee_cost
-
-    if (direction == "BUY" and cur_p >= tp2_p) or (
-        direction == "SELL" and cur_p <= tp2_p
-    ):
-      acc["realized_pnl"] += net_pnl_ntd
-      acc["today_realized_pnl"] += net_pnl_ntd
-      acc["total_trades_count"] += 1
-      acc["win_trades_count"] += 1
-      new_eq = acc["initial_capital"] + acc["realized_pnl"]
-      acc["closed_trades_today"].append(
-          f"• [{now_str}] <b>{label}</b> ({lots}口) 目標停利：<code>{entry_p:{p_fmt}} ➔ {cur_p:{p_fmt}}</code> (實拿 <b><code>{net_pnl_ntd:+,} 元</code></b>)"
+      stop_hit = (direction == "BUY" and cur_p <= sl_p) or (
+          direction == "SELL" and cur_p >= sl_p
       )
-      urgent_cards.append(
-          "🎉💰🎉 <b>【馬上停利！全數平倉出場！】</b> 🎉💰🎉\n"
-          f"📌 <b>商品</b>：<b>{label} (共 {lots} 口)</b>\n"
-          "━━━━━━━━━━━━━━━━━━\n"
-          f"👉 <b>現在立刻平倉價</b>：<b><code>{cur_p:{p_fmt}} 元</code></b> <i>(進場成本 {entry_p:{p_fmt}} 元)</i>\n"
-          f"💰 <b>本筆平倉實拿獲利</b>：<b><code>{net_pnl_ntd:+,} 元</code></b> <i>(已扣稅費)</i>\n"
-          f"🏦 <b>平倉後帳戶總金額</b>：<b><code>{new_eq:,} 元</code></b>\n"
-          "━━━━━━━━━━━━━━━━━━\n"
-          "✅ <b>已達波段最終目標價，請立即全數獲利了結！</b>"
+      tp2_hit = (direction == "BUY" and cur_p >= tp2_p) or (
+          direction == "SELL" and cur_p <= tp2_p
       )
-      state["positions"][asset] = None
-      continue
-
-    if not tp1_hit and (
-        (direction == "BUY" and cur_p >= tp1_p)
-        or (direction == "SELL" and cur_p <= tp1_p)
-    ):
-      pos["tp1_hit"] = True
-      lock_offset = abs(tp1_p - entry_p) * 0.30
-      new_sl = (
-          round(entry_p + lock_offset, 2)
-          if direction == "BUY"
-          else round(entry_p - lock_offset, 2)
-      )
-      if asset == "QFF":
-        new_sl = round(new_sl / 5) * 5
-      pos["sl"] = new_sl
-      urgent_cards.append(
-          "💰💰💰 <b>【馬上停利減碼！並將防守線上移保本！】</b> 💰💰💰\n"
-          f"📌 <b>商品</b>：<b>{label} (持倉 {lots} 口)</b>\n"
-          "━━━━━━━━━━━━━━━━━━\n"
-          f"👉 <b>現在達標價位</b>：<b><code>{cur_p:{p_fmt}} 元</code></b> <i>(浮盈 {net_pnl_ntd:+,} 元)</i>\n"
-          f"🛡️ <b>最新鎖利停損價</b>：<b><code>改設 {new_sl:{p_fmt}} 元 (穩賺不賠)</code></b>\n"
-          f"🎯 <b>主力倉大目標價</b>：<b><code>{tp2_p:{p_fmt}} 元</code></b>"
-      )
-      continue
-
-    if (direction == "BUY" and cur_p <= sl_p) or (
-        direction == "SELL" and cur_p >= sl_p
-    ):
-      acc["realized_pnl"] += net_pnl_ntd
-      acc["today_realized_pnl"] += net_pnl_ntd
-      acc["total_trades_count"] += 1
-      if net_pnl_ntd > 0:
-        acc["win_trades_count"] += 1
-      new_eq = acc["initial_capital"] + acc["realized_pnl"]
-      tag_str = "鎖利出場" if tp1_hit else "停損出場"
-      acc["closed_trades_today"].append(
-          f"• [{now_str}] <b>{label}</b> ({lots}口) {tag_str}：<code>{entry_p:{p_fmt}} ➔ {cur_p:{p_fmt}}</code> (損益 <b><code>{net_pnl_ntd:+,} 元</code></b>)"
+      tp1_hit_now = (not tp1_hit) and (
+          (direction == "BUY" and cur_p >= tp1_p)
+          or (direction == "SELL" and cur_p <= tp1_p)
       )
 
-      if tp1_hit:
-        urgent_cards.append(
-            "🛡️ <b>【馬上平倉！觸及鎖利防守線出場！】</b> 🛡️\n"
-            f"📌 <b>商品</b>：<b>{label} (共 {lots} 口)</b>\n"
-            "━━━━━━━━━━━━━━━━━━\n"
-            f"👉 <b>現在立刻平倉價</b>：<b><code>{cur_p:{p_fmt}} 元</code></b>\n"
-            f"💰 <b>本筆平倉實拿獲利</b>：<b><code>{net_pnl_ntd:+,} 元</code></b>\n"
-            f"🏦 <b>平倉後帳戶總金額</b>：<b><code>{new_eq:,} 元</code></b>"
+      # ---- 優先序 1：硬停損（開盤緩衝時段內不觸發） ----
+      if stop_hit and not open_buffer:
+        tag_str = "鎖利出場" if tp1_hit else "停損出場"
+        total_net = _book_full_close(
+            state, asset, slot_name, pos, cur_p, unit_mult, p_fmt,
+            label, tag_str, now_str,
         )
-      else:
+        new_eq = acc["initial_capital"] + acc["realized_pnl"]
+        if tp1_hit:
+          urgent_cards.append(
+              "🛡️ <b>【馬上平倉！觸及鎖利防守線出場！】</b> 🛡️\n"
+              f"📌 <b>商品</b>：<b>{label} (共 {lots} 口)</b>\n"
+              "━━━━━━━━━━━━━━━━━━\n"
+              f"👉 <b>現在立刻平倉價</b>：<b><code>{cur_p:{p_fmt}} 元</code></b>\n"
+              f"💰 <b>本筆平倉損益</b>：<b><code>{total_net:+,} 元</code></b>\n"
+              f"🏦 <b>平倉後帳戶總金額</b>：<b><code>{new_eq:,} 元</code></b>"
+          )
+        else:
+          urgent_cards.append(
+              "🚨🛑🚨 <b>【立即停損出場！馬上平倉！】</b> 🚨🛑🚨\n"
+              f"📌 <b>商品</b>：<b>{label} (共 {lots} 口)</b>\n"
+              "━━━━━━━━━━━━━━━━━━\n"
+              f"👉 <b>現在立刻停損價</b>：<b><code>{cur_p:{p_fmt}} 元</code></b> <i>(已觸及停損線 {sl_p:{p_fmt}} 元)</i>\n"
+              f"❌ <b>本筆平倉損益</b>：<b><code>{total_net:+,} 元</code></b> <i>(原進場 {entry_p:{p_fmt}} 元)</i>\n"
+              f"🏦 <b>平倉後帳戶總金額</b>：<b><code>{new_eq:,} 元</code></b>\n"
+              "━━━━━━━━━━━━━━━━━━\n"
+              "⚠️ <b>請第一時間執行停損平倉，嚴格保護 10 萬保證金！</b>"
+          )
+        continue
+
+      # ---- 優先序 2：當沖收盤強制出場（不論盈虧） ----
+      forced = False
+      if pos_type == "daytrade":
+        sess_tag = pos.get("session")
+        if sess_tag == "day":
+          forced = (1325 <= hm <= 1345) or (cur_session == "night")
+        elif sess_tag == "night":
+          forced = (455 <= hm <= 500) or (cur_session == "day")
+        else:
+          forced = (1325 <= hm <= 1345) or (455 <= hm <= 500)
+      if forced:
+        total_net = _book_full_close(
+            state, asset, slot_name, pos, cur_p, unit_mult, p_fmt,
+            label, "當沖強制出場", now_str,
+        )
+        new_eq = acc["initial_capital"] + acc["realized_pnl"]
+        urgent_cards.append(_daytrade_close_card(
+            "⏰ <b>【當沖收盤強制出場】</b> ⏰", label, lots, cur_p,
+            p_fmt, entry_p, total_net, new_eq,
+        ))
+        continue
+
+      # ---- 優先序 3：波段／對鎖 TP2 全出 ----
+      if tp2_hit:
+        total_net = _book_full_close(
+            state, asset, slot_name, pos, cur_p, unit_mult, p_fmt,
+            label, "目標停利", now_str,
+        )
+        new_eq = acc["initial_capital"] + acc["realized_pnl"]
         urgent_cards.append(
-            "🚨🛑🚨 <b>【立即停損出場！馬上平倉！】</b> 🚨🛑🚨\n"
+            "🎉💰🎉 <b>【馬上停利！全數平倉出場！】</b> 🎉💰🎉\n"
             f"📌 <b>商品</b>：<b>{label} (共 {lots} 口)</b>\n"
             "━━━━━━━━━━━━━━━━━━\n"
-            f"👉 <b>現在立刻停損價</b>：<b><code>{cur_p:{p_fmt}} 元</code></b> <i>(已觸及停損線 {sl_p:{p_fmt}} 元)</i>\n"
-            f"❌ <b>本筆平倉損益</b>：<b><code>{net_pnl_ntd:+,} 元</code></b> <i>(原進場 {entry_p:{p_fmt}} 元)</i>\n"
+            f"👉 <b>現在立刻平倉價</b>：<b><code>{cur_p:{p_fmt}} 元</code></b> <i>(進場成本 {entry_p:{p_fmt}} 元)</i>\n"
+            f"💰 <b>本筆平倉實拿獲利</b>：<b><code>{total_net:+,} 元</code></b> <i>(已扣稅費)</i>\n"
             f"🏦 <b>平倉後帳戶總金額</b>：<b><code>{new_eq:,} 元</code></b>\n"
             "━━━━━━━━━━━━━━━━━━\n"
-            "⚠️ <b>請第一時間執行停損平倉，嚴格保護 10 萬保證金！</b>"
+            "✅ <b>已達波段最終目標價，請立即全數獲利了結！</b>"
         )
-      state["positions"][asset] = None
-      continue
+        continue
+
+      # ---- 優先序 4：TP1（波段分批＋移保本；當沖全出） ----
+      if tp1_hit_now:
+        if pos_type == "daytrade":
+          total_net = _book_full_close(
+              state, asset, slot_name, pos, cur_p, unit_mult, p_fmt,
+              label, "當沖TP1停利", now_str,
+          )
+          new_eq = acc["initial_capital"] + acc["realized_pnl"]
+          urgent_cards.append(_daytrade_close_card(
+              "💰 <b>【當沖 TP1 停利全出】</b> 💰", label, lots, cur_p,
+              p_fmt, entry_p, total_net, new_eq,
+          ))
+          continue
+        close_n = lots // 2
+        if close_n > 0:
+          if direction == "BUY":
+            partial_pnl = int(round((tp1_p - entry_p) * unit_mult * close_n)) - 50 * close_n
+          else:
+            partial_pnl = int(round((entry_p - tp1_p) * unit_mult * close_n)) - 50 * close_n
+          acc["realized_pnl"] += partial_pnl
+          acc["today_realized_pnl"] += partial_pnl
+          pos["realized_partial"] = int(pos.get("realized_partial", 0)) + partial_pnl
+          pos["closed_lots"] = int(pos.get("closed_lots", 0)) + close_n
+          pos["lots"] = lots - close_n
+          acc["closed_trades_today"].append(
+              f"• [{now_str}] <b>{label}</b> ({close_n}口) TP1分批出場 {_pos_attr(pos, p_fmt)}："
+              f"<code>{entry_p:{p_fmt}} ➔ {tp1_p:{p_fmt}}</code> (損益 <b><code>{partial_pnl:+,} 元</code></b>，剩餘 {pos['lots']} 口停損移保本)"
+          )
+        pos["tp1_hit"] = True
+        pos["sl"] = entry_p
+        remain_lots = int(pos.get("lots", lots))
+        if direction == "BUY":
+          float_pnl = int(round((cur_p - entry_p) * unit_mult * remain_lots))
+        else:
+          float_pnl = int(round((entry_p - cur_p) * unit_mult * remain_lots))
+        urgent_cards.append(
+            "💰💰💰 <b>【馬上停利減碼！並將防守線上移保本！】</b> 💰💰💰\n"
+            f"📌 <b>商品</b>：<b>{label} (持倉 {remain_lots} 口)</b>\n"
+            "━━━━━━━━━━━━━━━━━━\n"
+            f"👉 <b>現在達標價位</b>：<b><code>{cur_p:{p_fmt}} 元</code></b> <i>(浮盈 {float_pnl:+,} 元)</i>\n"
+            f"🛡️ <b>最新鎖利停損價</b>：<b><code>改設 {entry_p:{p_fmt}} 元 (穩賺不賠)</code></b>\n"
+            f"🎯 <b>主力倉大目標價</b>：<b><code>{tp2_p:{p_fmt}} 元</code></b>"
+        )
+        continue
 
   return urgent_cards
 
@@ -1264,12 +1473,20 @@ def run_single_scan(
   qff_atr = max(safe_float(t_m15["ATR"], 14.0), 12.0)
 
   srf_sl_dist = max(round((srf_atr * 1.25) * 20) / 20.0, 0.50)
-  srf_tp1_dist = max(round((srf_atr * 1.05) * 20) / 20.0, 0.45)
+  srf_tp1_dist = max(round((srf_atr * SWING_TP1_MULT) * 20) / 20.0, 0.45)
   srf_tp2_dist = max(round((srf_atr * 3.50) * 20) / 20.0, 1.50)
 
   qff_sl_dist = max(round((qff_atr * 1.25) / 5) * 5, 20.0)
-  qff_tp1_dist = max(round((qff_atr * 1.05) / 5) * 5, 20.0)
+  qff_tp1_dist = max(round((qff_atr * SWING_TP1_MULT) / 5) * 5, 20.0)
   qff_tp2_dist = max(round((qff_atr * 3.50) / 5) * 5, 55.0)
+
+  # 當沖欄位距離（目前無當沖進場訊號，先備妥供未來接線用）
+  srf_dt_sl_dist = max(round((srf_atr * DAYTRADE_SL_MULT) * 20) / 20.0, 0.50)
+  srf_dt_tp1_dist = max(round((srf_atr * DAYTRADE_TP1_MULT) * 20) / 20.0, 0.45)
+  srf_dt_tp2_dist = max(round((srf_atr * DAYTRADE_TP2_MULT) * 20) / 20.0, 1.50)
+  qff_dt_sl_dist = max(round((qff_atr * DAYTRADE_SL_MULT) / 5) * 5, 20.0)
+  qff_dt_tp1_dist = max(round((qff_atr * DAYTRADE_TP1_MULT) / 5) * 5, 20.0)
+  qff_dt_tp2_dist = max(round((qff_atr * DAYTRADE_TP2_MULT) / 5) * 5, 55.0)
 
   srf_chip = round(safe_float(m15["Chip_POC"], srf_price), 2)
   qff_chip = round(safe_float(t_m15["Chip_POC"], qff_price))
@@ -1285,13 +1502,6 @@ def run_single_scan(
         now_tw.strftime("%H:%M:%S"),
     )
     cards_to_send.extend(urgent_exits)
-
-  def get_portfolio_dir():
-    for k in ["SRF", "QFF"]:
-      p = state["positions"].get(k)
-      if p and p.get("dir"):
-        return p.get("dir")
-    return None
 
   def fire_signal(
       sig_key: str,
@@ -1310,46 +1520,88 @@ def run_single_scan(
       unit_mult: int,
       p_fmt: str,
       ctx_str: str,
-  ):
+      pos_type: str = "swing",
+      priority=None,
+  ) -> bool:
+    """開倉（2026-10-27 重構版）。回傳 True = 本輪成功開倉或對鎖觸發出場。
+
+    欄位規則：同商品同類型同時最多一個部位；不同類型可並存；全帳戶方向鎖已廢除。
+    對鎖觸發時若已有反向波段部位，視為波段出場訊號：波段部位以現價平倉入帳，
+    不開對鎖欄位（對鎖手動單仍照舊以警示卡通知使用者在另一月份執行）。
+    """
     if (now_ts - state["sent_signals"].get(sig_key, 0)) < SIGNAL_COOLDOWN_SEC:
-      return
+      return False
     cfg = opt.get(opt_key, {})
     pos_dir = "BUY" if mode_type == "BUY" else "SELL"
-    port_dir = get_portfolio_dir()
-
-    # 對鎖 (HEDGE_LOCK) 的標的是「另一月份合約」, 帳本同商品只有單一部位欄位:
-    # 若該商品已有部位, 直接覆寫會讓原部位損益無聲消失。已有空單就跳過;
-    # 已有多單時只推播對鎖警示卡, 不動帳本部位 (對鎖由使用者手動在另一月份執行)。
-    hedge_alert_only = False
-    if mode_type == "HEDGE_LOCK":
-      existing = state["positions"].get(asset)
-      if existing is not None:
-        if existing.get("dir") == "SELL":
-          return
-        hedge_alert_only = True
-    else:
-      if state["positions"].get(asset) is not None:
-        return
-      if port_dir is not None and port_dir != pos_dir:
-        return
+    slots = state["positions"].get(asset) or {}
+    if isinstance(slots, dict) and slots.get("dir"):
+      slots = migrate_positions(state["positions"]).get(asset, {})
+      state["positions"][asset] = slots
+    session_tag = "day" if sess.get("mode") == "DAY" else "night"
 
     wr = cfg.get("win_rate", default_wr)
     rr = max(cfg.get("rr", default_rr), 2.15)
     strat_label = cfg.get("algo_label", default_strat_name)
 
+    if mode_type == "HEDGE_LOCK":
+      swing_pos = slots.get("swing")
+      if swing_pos and swing_pos.get("dir") != pos_dir:
+        _book_full_close(
+            state, asset, "swing", swing_pos, entry_p, unit_mult, p_fmt,
+            f"{target_name} ({roll_info['target_label']})", "對鎖觸發出場",
+            now_tw.strftime("%H:%M:%S"),
+        )
+        state["sent_signals"][sig_key] = now_ts
+        acc_summary = compute_account_summary(state, srf_price, qff_price)
+        card = format_intuitive_entry_card(
+            mode_type,
+            target_name,
+            roll_info["target_label"],
+            lots,
+            strat_label,
+            wr,
+            rr,
+            entry_p,
+            sl_p,
+            tp1_p,
+            tp2_p,
+            unit_mult,
+            p_fmt,
+            ctx_str,
+            roll_info["near_m"],
+            roll_info["far_m"],
+            acc_summary["total_equity"],
+        )
+        cards_to_send.append(card)
+        return True
+      if slots.get("hedge") is not None:
+        return False
+      slot_name = "hedge"
+    else:
+      if slots.get(pos_type) is not None:
+        return False
+      slot_name = pos_type
+
     state["sent_signals"][sig_key] = now_ts
-    if not hedge_alert_only:
-      state["positions"][asset] = {
-          "dir": pos_dir,
-          "lots": lots,
-          "entry": entry_p,
-          "sl": sl_p,
-          "tp1": tp1_p,
-          "tp2": tp2_p,
-          "ts": now_ts,
-          "strategy": strat_label,
-          "tp1_hit": False,
-      }
+    state["positions"][asset][slot_name] = {
+        "dir": pos_dir,
+        "lots": lots,
+        "entry": entry_p,
+        "sl": sl_p,
+        "tp1": tp1_p,
+        "tp2": tp2_p,
+        "ts": now_ts,
+        "strategy": strat_label,
+        "tp1_hit": False,
+        "pos_type": slot_name,
+        "priority": priority,
+        "session": session_tag,
+        "sl_dist": abs(entry_p - sl_p),
+        "tp1_dist": abs(tp1_p - entry_p),
+        "tp2_dist": abs(tp2_p - entry_p),
+        "closed_lots": 0,
+        "realized_partial": 0,
+    }
     acc_summary = compute_account_summary(state, srf_price, qff_price)
     card = format_intuitive_entry_card(
         mode_type,
@@ -1371,16 +1623,19 @@ def run_single_scan(
         acc_summary["total_equity"],
     )
     cards_to_send.append(card)
+    return True
 
   mkt_ctx_bull = f"小那({nq_price:.0f}/{nq_chg_pct:+.2f}%)｜台指({tx_price:.0f})守穩籌碼重心({tx_chip_poc})與樞紐({P})"
   mkt_ctx_bear = f"小那({nq_price:.0f}/{nq_chg_pct:+.2f}%)｜台指({tx_price:.0f})跌破籌碼重心({tx_chip_poc})或極限乖離衰竭"
 
   # ---------------- 🎯【0050 小股期 (SRF) — 必須有期交所真實報價 srf_live_ready 才觸發】 ----------------
+  # 波段進場優先序（2026-10-27 重構，明表）：S3 → S1 → S2 → S4；對鎖獨立於波段欄位，
+  # 僅在波段未進場時評估（沿用舊 elif 鏈「波段優先於對鎖」的 precedence）。
   if srf_live_ready:
     prev_srf_mid = (
-        safe_float(m15_p["Open"]) + safe_float(m15_p["Close"])
+      safe_float(m15_p["Open"]) + safe_float(m15_p["Close"])
     ) / 2.0
-    if (
+    cond_srf_s4 = (
         srf_price >= safe_float(m15["MA120"]) * 0.985
         and (
             safe_float(m15_p["RSI2"]) <= 22
@@ -1393,26 +1648,8 @@ def run_single_scan(
         )
         and safe_float(m5["MACD_Hist"]) >= safe_float(m5_p["MACD_Hist"])
         and not nq_bearish
-    ):
-      fire_signal(
-          "SRF_S4_BUY",
-          "SRF_S4",
-          "BUY",
-          "SRF",
-          "0050小股期 (SRF)",
-          2,
-          "布林下軌W底雙確認 (賺賠比升級)",
-          66.5,
-          2.35,
-          srf_price,
-          round(srf_price - srf_sl_dist, 2),
-          round(srf_price + srf_tp1_dist, 2),
-          round(srf_price + srf_tp2_dist, 2),
-          1000,
-          ".2f",
-          mkt_ctx_bull,
-      )
-    elif (
+    )
+    cond_srf_s1 = (
         tx_bullish
         and nq_bullish
         and srf_price >= safe_float(m15["MA60"])
@@ -1425,26 +1662,8 @@ def run_single_scan(
             safe_float(m15["K"]) >= safe_float(m15["D"])
             or safe_float(m5["K"]) >= safe_float(m5["D"])
         )
-    ):
-      fire_signal(
-          "SRF_S1_BUY",
-          "SRF_S1",
-          "BUY",
-          "SRF",
-          "0050小股期 (SRF)",
-          2,
-          "外資VWAP籌碼首回測確認",
-          75.0,
-          2.35,
-          srf_price,
-          round(srf_price - srf_sl_dist, 2),
-          round(srf_price + srf_tp1_dist, 2),
-          round(srf_price + srf_tp2_dist, 2),
-          1000,
-          ".2f",
-          mkt_ctx_bull,
-      )
-    elif (
+    )
+    cond_srf_s2 = (
         safe_float(m15_p["VCP_Ratio"]) <= 0.96
         and srf_price > safe_float(m15["MA10"])
         and srf_price > srf_chip
@@ -1453,26 +1672,8 @@ def run_single_scan(
             or srf_price >= safe_float(m5_p["High"])
         )
         and 30 <= safe_float(m15["J"]) <= 84
-    ):
-      fire_signal(
-          "SRF_S2_BUY",
-          "SRF_S2",
-          "BUY",
-          "SRF",
-          "0050小股期 (SRF)",
-          2,
-          "Minervini VCP口袋支點",
-          70.0,
-          3.27,
-          srf_price,
-          round(srf_price - srf_sl_dist, 2),
-          round(srf_price + srf_tp1_dist, 2),
-          round(srf_price + srf_tp2_dist, 2),
-          1000,
-          ".2f",
-          mkt_ctx_bull,
-      )
-    elif (
+    )
+    cond_srf_s3 = (
         tx_bullish
         and nq_bullish
         and srf_price >= srf_chip
@@ -1483,26 +1684,8 @@ def run_single_scan(
         )
         and 25 <= safe_float(m15["J"]) <= 78
         and safe_float(m15["MACD_Hist"]) >= 0
-    ):
-      fire_signal(
-          "SRF_S3_BUY",
-          "SRF_S3",
-          "BUY",
-          "SRF",
-          "0050小股期 (SRF)",
-          2,
-          "日夜盤籌碼順勢共振多",
-          66.7,
-          3.99,
-          srf_price,
-          round(srf_price - srf_sl_dist, 2),
-          round(srf_price + srf_tp1_dist, 2),
-          round(srf_price + srf_tp2_dist, 2),
-          1000,
-          ".2f",
-          mkt_ctx_bull,
-      )
-    elif (
+    )
+    cond_srf_hedge = (
         (
             (
                 m15_p["High"] >= m15_p["BB_Upper"] * 0.999
@@ -1517,32 +1700,43 @@ def run_single_scan(
             and srf_price < safe_float(m15["MA20"])
             and safe_float(m15["K"]) < safe_float(m15["D"])
         )
-    ) and safe_float(m15["MACD_Hist"]) < safe_float(m15_p["MACD_Hist"]):
+    ) and safe_float(m15["MACD_Hist"]) < safe_float(m15_p["MACD_Hist"])
+    srf_swing_cands = [
+        ("SRF_S3_BUY", "SRF_S3", "BUY", "日夜盤籌碼順勢共振多", 66.7, 3.99, cond_srf_s3, "P1"),
+        ("SRF_S1_BUY", "SRF_S1", "BUY", "外資VWAP籌碼首回測確認", 75.0, 2.35, cond_srf_s1, "P2"),
+        ("SRF_S2_BUY", "SRF_S2", "BUY", "Minervini VCP口袋支點", 70.0, 3.27, cond_srf_s2, "P3"),
+        ("SRF_S4_BUY", "SRF_S4", "BUY", "布林下軌W底雙確認 (賺賠比升級)", 66.5, 2.35, cond_srf_s4, "P4"),
+    ]
+    fired_srf_swing = False
+    for sig_key, opt_key, mode_type, strat_name, wr, rr, cond, pri in srf_swing_cands:
+      if cond and fire_signal(
+          sig_key, opt_key, mode_type, "SRF", "0050小股期 (SRF)", 2,
+          strat_name, wr, rr, srf_price,
+          round(srf_price - srf_sl_dist, 2),
+          round(srf_price + srf_tp1_dist, 2),
+          round(srf_price + srf_tp2_dist, 2),
+          1000, ".2f", mkt_ctx_bull, pos_type="swing", priority=pri,
+      ):
+        fired_srf_swing = True
+        break
+    if not fired_srf_swing and cond_srf_hedge:
       fire_signal(
-          "SRF_HEDGE_SELL",
-          "SRF_HEDGE",
-          "HEDGE_LOCK",
-          "SRF",
-          "0050小股期 (SRF)",
-          2,
-          "極限乖離衰竭+破籌碼對鎖",
-          61.1,
-          2.08,
+          "SRF_HEDGE_SELL", "SRF_HEDGE", "HEDGE_LOCK", "SRF",
+          "0050小股期 (SRF)", 2, "極限乖離衰竭+破籌碼對鎖", 61.1, 2.08,
           srf_price,
           round(srf_price + srf_sl_dist, 2),
           round(srf_price - srf_tp1_dist, 2),
           round(srf_price - srf_tp2_dist, 2),
-          1000,
-          ".2f",
-          mkt_ctx_bear,
+          1000, ".2f", mkt_ctx_bear, pos_type="hedge", priority="H",
       )
 
   # ---------------- 👑【小台積電期貨 (QFF) — 必須有期交所真實報價 qff_live_ready 才觸發】 ----------------
+  # 波段進場優先序（2026-10-27 重構，明表）：T2 → T1；對鎖規則同 SRF。
   if qff_live_ready:
     prev_qff_mid = (
-        safe_float(t_m15_p["Open"]) + safe_float(t_m15_p["Close"])
+      safe_float(t_m15_p["Open"]) + safe_float(t_m15_p["Close"])
     ) / 2.0
-    if (
+    cond_qff_t1 = (
         qff_price >= safe_float(t_m15["MA120"]) * 0.985
         and (
             safe_float(t_m15_p["RSI2"]) <= 22
@@ -1555,26 +1749,8 @@ def run_single_scan(
         )
         and safe_float(t_m5["MACD_Hist"]) >= safe_float(t_m5_p["MACD_Hist"])
         and adr_premium_pct >= 5.0
-    ):
-      fire_signal(
-          "QFF_T1_BUY",
-          "QFF_T1",
-          "BUY",
-          "QFF",
-          "小台積電期貨 (QFF)",
-          1,
-          "Connors RSI(2)極限收腳 (賺賠比升級)",
-          68.0,
-          2.25,
-          qff_price,
-          qff_price - qff_sl_dist,
-          qff_price + qff_tp1_dist,
-          qff_price + qff_tp2_dist,
-          100,
-          ".0f",
-          mkt_ctx_bull,
-      )
-    elif (
+    )
+    cond_qff_t2 = (
         tx_bullish
         and nq_bullish
         and qff_price >= qff_chip
@@ -1585,26 +1761,8 @@ def run_single_scan(
         )
         and 25 <= safe_float(t_m15["J"]) <= 78
         and safe_float(t_m15["MACD_Hist"]) >= 0
-    ):
-      fire_signal(
-          "QFF_T2_BUY",
-          "QFF_T2",
-          "BUY",
-          "QFF",
-          "小台積電期貨 (QFF)",
-          1,
-          "日夜盤籌碼順勢共振多",
-          83.3,
-          4.50,
-          qff_price,
-          qff_price - qff_sl_dist,
-          qff_price + qff_tp1_dist,
-          qff_price + qff_tp2_dist,
-          100,
-          ".0f",
-          mkt_ctx_bull,
-      )
-    elif (
+    )
+    cond_qff_hedge = (
         (
             (
                 t_m15_p["High"] >= t_m15_p["BB_Upper"] * 0.999
@@ -1619,24 +1777,32 @@ def run_single_scan(
             and qff_price < safe_float(t_m15["MA20"])
             and safe_float(t_m15["K"]) < safe_float(t_m15["D"])
         )
-    ) and safe_float(t_m15["MACD_Hist"]) < safe_float(t_m15_p["MACD_Hist"]):
+    ) and safe_float(t_m15["MACD_Hist"]) < safe_float(t_m15_p["MACD_Hist"])
+    qff_swing_cands = [
+        ("QFF_T2_BUY", "QFF_T2", "BUY", "日夜盤籌碼順勢共振多", 83.3, 4.50, cond_qff_t2, "P1"),
+        ("QFF_T1_BUY", "QFF_T1", "BUY", "Connors RSI(2)極限收腳 (賺賠比升級)", 68.0, 2.25, cond_qff_t1, "P2"),
+    ]
+    fired_qff_swing = False
+    for sig_key, opt_key, mode_type, strat_name, wr, rr, cond, pri in qff_swing_cands:
+      if cond and fire_signal(
+          sig_key, opt_key, mode_type, "QFF", "小台積電期貨 (QFF)", 1,
+          strat_name, wr, rr, qff_price,
+          qff_price - qff_sl_dist,
+          qff_price + qff_tp1_dist,
+          qff_price + qff_tp2_dist,
+          100, ".0f", mkt_ctx_bull, pos_type="swing", priority=pri,
+      ):
+        fired_qff_swing = True
+        break
+    if not fired_qff_swing and cond_qff_hedge:
       fire_signal(
-          "QFF_HEDGE_SELL",
-          "QFF_HEDGE",
-          "HEDGE_LOCK",
-          "QFF",
-          "小台積電期貨 (QFF)",
-          1,
-          "高檔極限衰竭+初破籌碼對鎖",
-          65.0,
-          2.20,
+          "QFF_HEDGE_SELL", "QFF_HEDGE", "HEDGE_LOCK", "QFF",
+          "小台積電期貨 (QFF)", 1, "高檔極限衰竭+初破籌碼對鎖", 65.0, 2.20,
           qff_price,
           qff_price + qff_sl_dist,
           qff_price - qff_tp1_dist,
           qff_price - qff_tp2_dist,
-          100,
-          ".0f",
-          mkt_ctx_bear,
+          100, ".0f", mkt_ctx_bear, pos_type="hedge", priority="H",
       )
 
   # ================= 8. 推播輸出 =================

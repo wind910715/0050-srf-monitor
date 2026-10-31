@@ -529,5 +529,658 @@ def run_weekly_report():
   send_tg_message(msg)
 
 
+# =========================================================================
+# C. 2026-10-27 重構版投資組合回測（分層＋優先序＋新 SL/TP）
+#    觸發：python weekly_backtest.py refactor
+#    絕不呼叫 send_tg_message；結果只印 stdout 並寫 refactor_results.json。
+#    方法限制（報告中須揭露）：
+#    - 現貨 15m 代理期貨價（與已發表回測相同限制）；無夜盤 K 線，夜盤開盤緩衝無法驗證。
+#    - 5m 條件以 15m 槽位近似；NQ 濾網、ADR 溢價無資料未納入；S2 以回測版 VCP_Ratio 0.92
+#      為代表（實盤為 0.96）；訊號參數為固定代表值，不做優勝選拔。
+#    - 舊結構對照為同一投資組合 harness 重跑（單一欄位、舊出場、無開盤緩衝），
+#      與已發表 per-slot 數字（合計 +14,770、QFF_HEDGE -6,050）口徑不同，僅作參考並列。
+# =========================================================================
+REFACTOR_SWING_ORDER = {
+    "SRF": [
+        ("SNIPER_CHIP_MOMENTUM", "S3 日夜盤籌碼順勢共振多", 65, "P1"),
+        ("SNIPER_VWAP_PULLBACK", "S1 外資VWAP籌碼首回測確認", 38, "P2"),
+        ("MINERVINI_VCP_POCKET", "S2 Minervini VCP口袋支點", 80, "P3"),
+        ("UPGRADE_BB_W_BOTTOM", "S4 布林下軌W底雙確認", 24, "P4"),
+    ],
+    "QFF": [
+        ("SNIPER_CHIP_MOMENTUM", "T2 日夜盤籌碼順勢共振多", 65, "P1"),
+        ("UPGRADE_RSI2_SWING", "T1 Connors RSI(2)極限收腳", 22, "P2"),
+    ],
+}
+OLD_SWING_ORDER = {
+    "SRF": [
+        ("UPGRADE_BB_W_BOTTOM", "S4 布林下軌W底雙確認", 24, "P4"),
+        ("SNIPER_VWAP_PULLBACK", "S1 外資VWAP籌碼首回測確認", 38, "P2"),
+        ("MINERVINI_VCP_POCKET", "S2 Minervini VCP口袋支點", 80, "P3"),
+        ("SNIPER_CHIP_MOMENTUM", "S3 日夜盤籌碼順勢共振多", 65, "P1"),
+    ],
+    "QFF": [
+        ("UPGRADE_RSI2_SWING", "T1 Connors RSI(2)極限收腳", 22, "P2"),
+        ("SNIPER_CHIP_MOMENTUM", "T2 日夜盤籌碼順勢共振多", 65, "P1"),
+    ],
+}
+REFACTOR_HEDGE = {
+    "SRF": ("HYBRID_EXHAUST_HEDGE", "SRF 對鎖 極限乖離衰竭+破籌碼", 88),
+    "QFF": ("UPGRADE_TSMC_CLIMAX_HEDGE", "QFF 對鎖 高檔極限衰竭+初破籌碼", 86),
+}
+_SIGNAL_FN = {
+    "MINERVINI_VCP_POCKET": check_locked_signal,
+    "SNIPER_CHIP_MOMENTUM": check_locked_signal,
+    "SNIPER_VWAP_PULLBACK": check_locked_signal,
+    "HYBRID_EXHAUST_HEDGE": check_locked_signal,
+    "UPGRADE_BB_W_BOTTOM": check_targeted_upgrade_signal,
+    "UPGRADE_RSI2_SWING": check_targeted_upgrade_signal,
+    "UPGRADE_TSMC_CLIMAX_HEDGE": check_targeted_upgrade_signal,
+}
+_LOTS = {"SRF": 2, "QFF": 1}
+_MULT = {"SRF": 1000, "QFF": 100}
+
+
+def _refactor_close_trade(trades, pos, exit_price, reason, exit_i, mult):
+    pnl = pos["pnl_partial"] + int(round(
+        (exit_price - pos["entry"]) * mult * pos["lots"]
+        if pos["dir"] == "BUY"
+        else (pos["entry"] - exit_price) * mult * pos["lots"]
+    )) - 50 * pos["lots"]
+    total_lots = pos["closed_lots"] + pos["lots"]
+    trades.append({
+        "asset": pos["asset"], "layer": pos["layer"],
+        "strategy": pos["strategy"], "priority": pos["priority"],
+        "dir": pos["dir"], "entry_i": pos["entry_i"], "exit_i": exit_i,
+        "entry": pos["entry"], "exit": exit_price, "reason": reason,
+        "lots": total_lots, "pnl_ntd": pnl,
+        "pnl_pts": pnl / mult / total_lots,
+        "sl_dist": pos["sl_dist"], "tp1_dist": pos["tp1_dist"],
+        "tp2_dist": pos["tp2_dist"],
+    })
+
+
+def _refactor_run_asset(df, asset, swing_order, hedge, structure):
+    """Portfolio engine: one swing slot + one hedge slot (new) or one single
+    slot (old). Exits before entries each bar; a slot that exits on bar j
+    cannot re-enter on bar j (matches per-slot resume-at-next-bar)."""
+    is_new = structure == "new"
+    sl_mult, tp1_mult, tp2_mult = (1.25, 2.0, 3.5) if is_new else (1.25, 1.05, 3.5)
+    mult = _MULT[asset]
+    lots0 = _LOTS[asset]
+    dates = [d.date() for d in df.index]
+    first_bar = set()
+    seen = set()
+    for i, d in enumerate(dates):
+        if d not in seen:
+            seen.add(d)
+            first_bar.add(i)
+    trades = []
+    slots = {"swing": None, "hedge": None} if is_new else {"single": None}
+    for i in range(30, len(df)):
+        row = df.iloc[i]
+        prev = df.iloc[i - 1]
+        hi, lo = float(row["High"]), float(row["Low"])
+        close = float(row["Close"])
+        # 新結構開盤緩衝：每交易日第一根 K 不觸發硬停損（TP 照常）；舊結構無此規則
+        suppress_sl = is_new and i in first_bar
+        exited = set()
+        for slot_name in list(slots):
+            pos = slots[slot_name]
+            if pos is None:
+                continue
+            if pos["dir"] == "BUY":
+                hit_sl = (not suppress_sl) and lo <= pos["sl"]
+                hit_tp2 = hi >= pos["tp2"]
+                hit_tp1 = (not pos["tp1_hit"]) and hi >= pos["tp1"]
+            else:
+                hit_sl = (not suppress_sl) and hi >= pos["sl"]
+                hit_tp2 = lo <= pos["tp2"]
+                hit_tp1 = (not pos["tp1_hit"]) and lo <= pos["tp1"]
+            if hit_sl:
+                _refactor_close_trade(trades, pos, pos["sl"], "SL", i, mult)
+                slots[slot_name] = None
+                exited.add(slot_name)
+            elif hit_tp2:
+                _refactor_close_trade(trades, pos, pos["tp2"], "TP2", i, mult)
+                slots[slot_name] = None
+                exited.add(slot_name)
+            elif hit_tp1:
+                if is_new:
+                    close_n = pos["lots"] // 2
+                    if close_n > 0:
+                        if pos["dir"] == "BUY":
+                            pp = int(round((pos["tp1"] - pos["entry"]) * mult * close_n)) - 50 * close_n
+                        else:
+                            pp = int(round((pos["entry"] - pos["tp1"]) * mult * close_n)) - 50 * close_n
+                        pos["pnl_partial"] += pp
+                        pos["closed_lots"] += close_n
+                        pos["lots"] -= close_n
+                    pos["tp1_hit"] = True
+                    pos["sl"] = pos["entry"]
+                else:
+                    if pos["dir"] == "BUY":
+                        pos["sl"] = round(pos["entry"] + 0.30 * pos["tp1_dist"], 2)
+                    else:
+                        pos["sl"] = (round((pos["entry"] - 0.30 * pos["tp1_dist"]) / 5) * 5
+                                     if asset == "QFF"
+                                     else round(pos["entry"] - 0.30 * pos["tp1_dist"], 2))
+                    pos["tp1_hit"] = True
+        # ---- entries (after exits) ----
+        def open_pos(slot_name, layer, direction, entry, sl_d, tp1_d, tp2_d, strat, pri):
+            if direction == "BUY":
+                sl, tp1, tp2 = entry - sl_d, entry + tp1_d, entry + tp2_d
+            else:
+                sl, tp1, tp2 = entry + sl_d, entry - tp1_d, entry - tp2_d
+            slots[slot_name] = {
+                "asset": asset, "layer": layer, "dir": direction,
+                "entry": entry, "sl": sl, "tp1": tp1, "tp2": tp2,
+                "entry_i": i, "strategy": strat, "priority": pri,
+                "tp1_hit": False, "lots": lots0, "closed_lots": 0,
+                "pnl_partial": 0, "sl_dist": sl_d, "tp1_dist": tp1_d,
+                "tp2_dist": tp2_d,
+            }
+        if is_new:
+            swing_opened = False
+            if slots["swing"] is None and "swing" not in exited:
+                for algo_id, label, param, pri in swing_order:
+                    direction = _SIGNAL_FN[algo_id](row, prev, algo_id, param)
+                    if direction == "BUY":
+                        sl_d, tp1_d, tp2_d = _live_dists(asset, float(row["ATR"]), sl_mult, tp1_mult, tp2_mult)
+                        open_pos("swing", "swing", "BUY", close, sl_d, tp1_d, tp2_d, label, pri)
+                        swing_opened = True
+                        break
+            if slots["hedge"] is None and "hedge" not in exited and not swing_opened:
+                algo_id, label, param = hedge
+                direction = _SIGNAL_FN[algo_id](row, prev, algo_id, param)
+                if direction == "SELL":
+                    sw = slots["swing"]
+                    if sw is not None and sw["dir"] == "BUY":
+                        _refactor_close_trade(trades, sw, close, "hedge-triggered", i, mult)
+                        slots["swing"] = None
+                    else:
+                        sl_d, tp1_d, tp2_d = _live_dists(asset, float(row["ATR"]), sl_mult, tp1_mult, tp2_mult)
+                        open_pos("hedge", "hedge", "SELL", close, sl_d, tp1_d, tp2_d, label, "H")
+        else:
+            if slots["single"] is None and "single" not in exited:
+                opened = False
+                for algo_id, label, param, pri in swing_order:
+                    direction = _SIGNAL_FN[algo_id](row, prev, algo_id, param)
+                    if direction == "BUY":
+                        sl_d, tp1_d, tp2_d = _live_dists(asset, float(row["ATR"]), sl_mult, tp1_mult, tp2_mult)
+                        open_pos("single", "swing", "BUY", close, sl_d, tp1_d, tp2_d, label, pri)
+                        opened = True
+                        break
+                if not opened:
+                    algo_id, label, param = hedge
+                    direction = _SIGNAL_FN[algo_id](row, prev, algo_id, param)
+                    if direction == "SELL":
+                        sl_d, tp1_d, tp2_d = _live_dists(asset, float(row["ATR"]), sl_mult, tp1_mult, tp2_mult)
+                        open_pos("single", "hedge", "SELL", close, sl_d, tp1_d, tp2_d, label, "H")
+    censored = sum(1 for v in slots.values() if v is not None)
+    return trades, censored
+
+
+def _layer_stats(trades, mid_i):
+    total = len(trades)
+    wins = [t for t in trades if t["pnl_ntd"] > 0]
+    losses = [t for t in trades if t["pnl_ntd"] <= 0]
+    win_pts = [t["pnl_pts"] for t in wins]
+    loss_pts = [abs(t["pnl_pts"]) for t in losses]
+    avg_w = sum(win_pts) / len(win_pts) if win_pts else 0.0
+    avg_l = sum(loss_pts) / len(loss_pts) if loss_pts else 0.0
+    first = [t for t in trades if t["entry_i"] < mid_i]
+    second = [t for t in trades if t["entry_i"] >= mid_i]
+    avg = sum(t["pnl_ntd"] for t in trades) / total if total else 0.0
+    return {
+        "total": total, "wins": len(wins),
+        "win_rate": round(len(wins) / total * 100.0, 1) if total else 0.0,
+        "avg_ntd": round(avg, 0),
+        "avg_pts": round(sum(t["pnl_pts"] for t in trades) / total, 3) if total else 0.0,
+        "avg_win_pts": round(avg_w, 3),
+        "avg_loss_pts": round(avg_l, 3),
+        "rr": round(avg_w / avg_l, 2) if avg_l > 0 else 0.0,
+        "net_ntd": sum(t["pnl_ntd"] for t in trades),
+        "first_n": len(first),
+        "first_avg_ntd": round(sum(t["pnl_ntd"] for t in first) / len(first), 0) if first else 0.0,
+        "second_n": len(second),
+        "second_avg_ntd": round(sum(t["pnl_ntd"] for t in second) / len(second), 0) if second else 0.0,
+    }
+
+
+def run_refactor_backtest():
+    now_str = datetime.now(TW_TZ).strftime("%Y-%m-%d %H:%M")
+    df_0050 = prepare_master_df("0050.TW", "60d", "15m")
+    df_2330 = prepare_master_df("2330.TW", "60d", "15m")
+    out = {"run_at": now_str,
+           "window": {"0050": [str(df_0050.index[0]), str(df_0050.index[-1]), len(df_0050)],
+                      "2330": [str(df_2330.index[0]), str(df_2330.index[-1]), len(df_2330)]},
+           "structures": {}}
+    for structure, swing_order in (("new", REFACTOR_SWING_ORDER), ("old", OLD_SWING_ORDER)):
+        all_trades = []
+        struct = {"layers": {}, "censored": 0}
+        for asset, df in (("SRF", df_0050), ("QFF", df_2330)):
+            mid_i = len(df) // 2
+            trades, censored = _refactor_run_asset(
+                df, asset, swing_order[asset], REFACTOR_HEDGE[asset], structure)
+            struct["censored"] += censored
+            for layer in ("swing", "hedge"):
+                lt = [t for t in trades if t["layer"] == layer]
+                key = f"{asset}_{layer}"
+                struct["layers"][key] = _layer_stats(lt, mid_i)
+                struct["layers"][key]["trades"] = lt
+            all_trades.extend(trades)
+        struct["layers"]["TOTAL"] = _layer_stats(all_trades, 10 ** 9)
+        # TOTAL 半段欄位不具意義（兩商品中點不同）：半段判定一律以分層為準，
+        # 此處將 TOTAL 的半段欄位清空，避免誤讀。
+        struct["layers"]["TOTAL"]["first_n"] = None
+        struct["layers"]["TOTAL"]["first_avg_ntd"] = None
+        struct["layers"]["TOTAL"]["second_n"] = None
+        struct["layers"]["TOTAL"]["second_avg_ntd"] = None
+        out["structures"][structure] = struct
+    # strip raw trades from TOTAL-only view for json size, keep layer trades
+    print("=== 2026-10-27 SRF refactor backtest (60d 15m spot proxy) ===")
+    print(f"run_at: {now_str}")
+    for asset in ("0050", "2330"):
+        w = out["window"][asset]
+        print(f"window {asset}: {w[0]} -> {w[1]} ({w[2]} bars)")
+    for structure in ("new", "old"):
+        print(f"--- structure: {structure} ---")
+        struct = out["structures"][structure]
+        for key in ("SRF_swing", "QFF_swing", "SRF_hedge", "QFF_hedge"):
+            s = struct["layers"][key]
+            print(f"{key}: n={s['total']} win={s['win_rate']}% avg={s['avg_ntd']:,.0f} NTD "
+                  f"({s['avg_pts']:+.3f} pts) RR={s['rr']} net={s['net_ntd']:+,} "
+                  f"1H n={s['first_n']} avg={s['first_avg_ntd']:,.0f} | "
+                  f"2H n={s['second_n']} avg={s['second_avg_ntd']:,.0f}")
+        print(f"censored (still open at end): {struct['censored']}")
+    with open("refactor_results.json", "w", encoding="utf-8") as f:
+        json.dump(out, f, ensure_ascii=False, indent=2)
+    print("wrote refactor_results.json")
+
+# =========================================================================
+# D. 2026-10-27 變體對照實驗（V0-V5，事前註冊）
+#    觸發：python weekly_backtest.py variants
+#    絕不呼叫 send_tg_message；結果只印 stdout 並寫 variants_results.json。
+#    共用口徑：同一 harness、同一 60 天窗口、同一費用（每口 50 元）、
+#    同一過關標準（平均正、RR ≥ 1.8、前後半皆正；n＜30 標註樣本不足）。
+#    V0 同時引用已發表數字與在本次資料上重算（窗口滾動可能造成微差，兩者並列）。
+# =========================================================================
+def _s3_live_signal(row, prev, algo_id, param_val):
+  """實盤版 SRF S3 等價條件（monitor_srf.py cond_srf_s3）：
+  tx_bullish + nq_bullish + price>=Chip_POC + price>=MA10 + (K>D) +
+  25<=J<=78 + MACD>=0。
+  回測近似（須揭露）：tx_bullish 以 TX_Bull（台指收盤>=台指 MA20）代理；
+  NQ 無資料省略；5m K/D 以 15m 代替；無 MA10>=MA20 要求；無 K/D 交叉要求
+  （實盤只要當根 K>D）；J 上限 78（回測版為 65）；MACD 只要 >=0（回測版要求 >0 且上升）。"""
+  if (
+      row["TX_Bull"] == 1
+      and row["Close"] >= row["Chip_POC"]
+      and row["Close"] >= row["MA10"]
+      and row["K"] > row["D"]
+      and 25 <= row["J"] <= 78
+      and row["MACD_Hist"] >= 0
+  ):
+    return "BUY"
+  return None
+
+
+_SIGNAL_FN["S3_LIVE"] = _s3_live_signal
+
+VARIANT_SRF_NO_S4 = [
+    ("SNIPER_CHIP_MOMENTUM", "S3 日夜盤籌碼順勢共振多", 65, "P1"),
+    ("SNIPER_VWAP_PULLBACK", "S1 外資VWAP籌碼首回測確認", 38, "P2"),
+    ("MINERVINI_VCP_POCKET", "S2 Minervini VCP口袋支點", 80, "P3"),
+]
+VARIANT_QFF_NO_T1 = [
+    ("SNIPER_CHIP_MOMENTUM", "T2 日夜盤籌碼順勢共振多", 65, "P1"),
+]
+VARIANT_SRF_S3_LIVE = [
+    ("S3_LIVE", "S3-live 實盤等價條件", 78, "P1"),
+    ("SNIPER_VWAP_PULLBACK", "S1 外資VWAP籌碼首回測確認", 38, "P2"),
+    ("MINERVINI_VCP_POCKET", "S2 Minervini VCP口袋支點", 80, "P3"),
+    ("UPGRADE_BB_W_BOTTOM", "S4 布林下軌W底雙確認", 24, "P4"),
+]
+
+
+def _daytrade_run_single(df, asset, algo_id, label, param, pri):
+  """當沖鏡像單策略引擎：進場條件與波段版相同；出場 SL 1.0／TP1 1.5 全出／
+  TP2 2.5 ATR；當日最後一根 K 收盤強制出場（EOD，不論盈虧）。
+  出場優先序：硬停損 ＞ TP2 ＞ TP1 ＞ EOD（與波段引擎一致的保守順序）。
+  限制：資料為現貨日盤 15m，無夜盤 K 線，故夜盤 05:00 強制出場無法驗證；
+  日盤強制出場以當日最後一根 K 執行。開盤首根 K 不觸發停損的緩衝對當沖
+  部位恆不適用（當沖部位不過夜，首根 K 時無持倉）。"""
+  fn = _SIGNAL_FN[algo_id]
+  mult = _MULT[asset]
+  lots0 = _LOTS[asset]
+  dates = [d.date() for d in df.index]
+  last_bar = set()
+  for i in range(len(dates)):
+    if i == len(dates) - 1 or dates[i + 1] != dates[i]:
+      last_bar.add(i)
+  trades = []
+  pos = None
+  censored = 0
+  for i in range(30, len(df)):
+    row = df.iloc[i]
+    prev = df.iloc[i - 1]
+    hi, lo = float(row["High"]), float(row["Low"])
+    close = float(row["Close"])
+    exited = False
+    if pos is not None:
+      if pos["dir"] == "BUY":
+        sl, tp1, tp2 = pos["entry"] - pos["sl_d"], pos["entry"] + pos["tp1_d"], pos["entry"] + pos["tp2_d"]
+        hit_sl, hit_tp2, hit_tp1 = lo <= sl, hi >= tp2, hi >= tp1
+        exit_px = {"SL": sl, "TP2": tp2, "TP1": tp1}.get(
+            "SL" if hit_sl else "TP2" if hit_tp2 else "TP1" if hit_tp1 else None)
+        reason = "SL" if hit_sl else "TP2" if hit_tp2 else "TP1" if hit_tp1 else None
+      else:
+        sl, tp1, tp2 = pos["entry"] + pos["sl_d"], pos["entry"] - pos["tp1_d"], pos["entry"] - pos["tp2_d"]
+        hit_sl, hit_tp2, hit_tp1 = hi >= sl, lo <= tp2, lo <= tp1
+        exit_px = {"SL": sl, "TP2": tp2, "TP1": tp1}.get(
+            "SL" if hit_sl else "TP2" if hit_tp2 else "TP1" if hit_tp1 else None)
+        reason = "SL" if hit_sl else "TP2" if hit_tp2 else "TP1" if hit_tp1 else None
+      if reason is None and i in last_bar:
+        reason, exit_px = "EOD", close
+      if reason is not None:
+        pnl = int(round(
+            (exit_px - pos["entry"]) * mult * pos["lots"]
+            if pos["dir"] == "BUY"
+            else (pos["entry"] - exit_px) * mult * pos["lots"]
+        )) - 50 * pos["lots"]
+        trades.append({
+            "asset": asset, "layer": "daytrade", "strategy": label,
+            "priority": pri, "dir": pos["dir"], "entry_i": pos["entry_i"],
+            "exit_i": i, "entry": pos["entry"], "exit": exit_px,
+            "reason": reason, "lots": pos["lots"], "pnl_ntd": pnl,
+            "pnl_pts": pnl / mult / pos["lots"],
+            "sl_dist": pos["sl_d"], "tp1_dist": pos["tp1_d"],
+            "tp2_dist": pos["tp2_d"],
+        })
+        pos = None
+        exited = True
+    if not exited and pos is None and i not in last_bar:
+      direction = fn(row, prev, algo_id, param)
+      if direction == "BUY":
+        sl_d, tp1_d, tp2_d = _live_dists(asset, float(row["ATR"]), 1.0, 1.5, 2.5)
+        pos = {"dir": "BUY", "entry": close, "entry_i": i,
+               "sl_d": sl_d, "tp1_d": tp1_d, "tp2_d": tp2_d, "lots": lots0}
+  if pos is not None:
+    censored = 1
+  return trades, censored
+
+
+def _variant_verdict(s):
+  """三項標準：平均正、RR ≥ 1.8、前後半皆正。n=0 為無法判定；
+  全勝（無虧損筆）時 RR 視為通過；虧損筆皆為損平（平均虧損點數為 0）時
+  RR 無法計算，單獨標註；半段無交易時標註為無交易而非負值。
+  樣本不足（n<30）一律加註，不論過關與否。"""
+  if s["total"] == 0:
+    return "無法判定（0 筆）"
+  losses = s["total"] - s["wins"]
+  if losses == 0 and s["wins"] > 0:
+    rr_ok, rr_note = True, ""
+  elif s.get("avg_loss_pts", 0) == 0:
+    rr_ok, rr_note = False, "RR無法計算（虧損筆皆損平）"
+  else:
+    rr_ok, rr_note = (s["rr"] >= 1.8), ""
+  half_note = ""
+  if s["first_n"] == 0 or s["second_n"] == 0:
+    half_ok = False
+    half_note = "半段無交易"
+  else:
+    half_ok = (s["first_avg_ntd"] > 0) and (s["second_avg_ntd"] > 0)
+  ok = (s["avg_ntd"] > 0) and rr_ok and half_ok
+  tag = "（樣本不足 n<30，僅參考）" if s["total"] < 30 else ""
+  if ok:
+    return "過關" + tag
+  reasons = []
+  if s["avg_ntd"] <= 0:
+    reasons.append("平均≤0")
+  if not rr_ok:
+    reasons.append(rr_note if rr_note else "RR<1.8")
+  if half_note:
+    reasons.append(half_note)
+  else:
+    if s["first_avg_ntd"] <= 0:
+      reasons.append("前半≤0")
+    if s["second_avg_ntd"] <= 0:
+      reasons.append("後半≤0")
+  return "不過關：" + "、".join(reasons) + tag
+
+
+def run_variants_backtest():
+  now_str = datetime.now(TW_TZ).strftime("%Y-%m-%d %H:%M")
+  df_0050 = prepare_master_df("0050.TW", "60d", "15m")
+  df_2330 = prepare_master_df("2330.TW", "60d", "15m")
+  out = {"run_at": now_str,
+         "window": {"0050": [str(df_0050.index[0]), str(df_0050.index[-1]), len(df_0050)],
+                    "2330": [str(df_2330.index[0]), str(df_2330.index[-1]), len(df_2330)]},
+         "variants": {}}
+  dfs = {"SRF": df_0050, "QFF": df_2330}
+
+  def run_new(asset, swing_order):
+    df = dfs[asset]
+    trades, censored = _refactor_run_asset(
+        df, asset, swing_order, REFACTOR_HEDGE[asset], "new")
+    return trades, censored, len(df) // 2
+
+  # V0 重算（與本次資料同一窗口，供 V1／V2／V4 對照）
+  v0 = {}
+  for asset in ("SRF", "QFF"):
+    trades, censored, mid_i = run_new(asset, REFACTOR_SWING_ORDER[asset])
+    for layer in ("swing", "hedge"):
+      lt = [t for t in trades if t["layer"] == layer]
+      s = _layer_stats(lt, mid_i)
+      s["trades"] = lt
+      s["censored"] = censored
+      v0[f"{asset}_{layer}"] = s
+  out["variants"]["V0_recomputed"] = {k: {kk: vv for kk, vv in v.items() if kk != "trades"} for k, v in v0.items()}
+  out["variants"]["V0_recomputed_trades"] = {
+      k: v["trades"] for k, v in v0.items()}
+
+  # V1：SRF 波段去 S4
+  trades, censored, mid_i = run_new("SRF", VARIANT_SRF_NO_S4)
+  lt = [t for t in trades if t["layer"] == "swing"]
+  s = _layer_stats(lt, mid_i)
+  s["trades"] = lt
+  s["censored"] = censored
+  out["variants"]["V1_SRF_swing_no_S4"] = {k: v for k, v in s.items() if k != "trades"}
+  out["variants"]["V1_trades"] = lt
+  lt_h = [t for t in trades if t["layer"] == "hedge"]
+  out["variants"]["V1_SRF_hedge_side"] = _layer_stats(lt_h, mid_i)
+
+  # V2：QFF 波段去 T1
+  trades, censored, mid_i = run_new("QFF", VARIANT_QFF_NO_T1)
+  lt = [t for t in trades if t["layer"] == "swing"]
+  s = _layer_stats(lt, mid_i)
+  s["trades"] = lt
+  s["censored"] = censored
+  out["variants"]["V2_QFF_swing_no_T1"] = {k: v for k, v in s.items() if k != "trades"}
+  out["variants"]["V2_trades"] = lt
+  lt_h = [t for t in trades if t["layer"] == "hedge"]
+  out["variants"]["V2_QFF_hedge_side"] = _layer_stats(lt_h, mid_i)
+
+  # V3：當沖鏡像（每支波段策略各別跑當沖出場）
+  v3 = {}
+  v3_trades = {}
+  for asset, strat_list in (("SRF", REFACTOR_SWING_ORDER["SRF"]), ("QFF", REFACTOR_SWING_ORDER["QFF"])):
+    df = dfs[asset]
+    mid_i = len(df) // 2
+    for algo_id, label, param, pri in strat_list:
+      trades, censored = _daytrade_run_single(df, asset, algo_id, label, param, pri)
+      s = _layer_stats(trades, mid_i)
+      s["censored"] = censored
+      key = f"{asset}_{label.split(' ')[0]}_daytrade"
+      v3[key] = s
+      v3_trades[key] = trades
+  out["variants"]["V3_daytrade_mirror"] = v3
+  out["variants"]["V3_trades"] = v3_trades
+
+  # V4：SRF 波段 S3 實盤等價條件
+  trades, censored, mid_i = run_new("SRF", VARIANT_SRF_S3_LIVE)
+  lt = [t for t in trades if t["layer"] == "swing"]
+  s = _layer_stats(lt, mid_i)
+  s["trades"] = lt
+  s["censored"] = censored
+  out["variants"]["V4_SRF_swing_S3_live"] = {k: v for k, v in s.items() if k != "trades"}
+  out["variants"]["V4_trades"] = lt
+  s3_trades = [t for t in lt if t["strategy"].startswith("S3-live")]
+  out["variants"]["V4_S3_live_only"] = _layer_stats(s3_trades, mid_i)
+  lt_h = [t for t in trades if t["layer"] == "hedge"]
+  out["variants"]["V4_SRF_hedge_side"] = _layer_stats(lt_h, mid_i)
+
+  # V5：V0 重算交易的策略 × 前後半拆解
+  breakdown = {}
+  for asset in ("SRF", "QFF"):
+    df = dfs[asset]
+    mid_i = len(df) // 2
+    for layer in ("swing", "hedge"):
+      lt = [t for t in v0[f"{asset}_{layer}"]["trades"]]
+      by_strat = {}
+      for t in lt:
+        by_strat.setdefault(t["strategy"], []).append(t)
+      for strat, st in by_strat.items():
+        first = [x for x in st if x["entry_i"] < mid_i]
+        second = [x for x in st if x["entry_i"] >= mid_i]
+        breakdown[f"{asset}_{layer}_{strat}"] = {
+            "total": len(st),
+            "wins": sum(1 for x in st if x["pnl_ntd"] > 0),
+            "net_ntd": sum(x["pnl_ntd"] for x in st),
+            "avg_ntd": round(sum(x["pnl_ntd"] for x in st) / len(st), 0) if st else 0.0,
+            "first_n": len(first),
+            "first_net": sum(x["pnl_ntd"] for x in first),
+            "first_avg": round(sum(x["pnl_ntd"] for x in first) / len(first), 0) if first else 0.0,
+            "second_n": len(second),
+            "second_net": sum(x["pnl_ntd"] for x in second),
+            "second_avg": round(sum(x["pnl_ntd"] for x in second) / len(second), 0) if second else 0.0,
+        }
+  out["variants"]["V5_breakdown"] = breakdown
+
+  with open("variants_results.json", "w", encoding="utf-8") as f:
+    json.dump(out, f, ensure_ascii=False, indent=2)
+  print("=== 2026-10-27 SRF variants backtest (60d 15m spot proxy) ===")
+  print(f"run_at: {now_str}")
+  for k, v in out["variants"].items():
+    if isinstance(v, dict) and "total" in v:
+      print(f"{k}: n={v['total']} win={v['win_rate']}% avg={v['avg_ntd']:,.0f} RR={v['rr']} "
+            f"net={v['net_ntd']:+,} 1H={v['first_avg_ntd']:,.0f} 2H={v['second_avg_ntd']:,.0f} -> {_variant_verdict(v)}")
+  for k, v in v3.items():
+    print(f"V3 {k}: n={v['total']} win={v['win_rate']}% avg={v['avg_ntd']:,.0f} RR={v['rr']} "
+          f"net={v['net_ntd']:+,} 1H={v['first_avg_ntd']:,.0f} 2H={v['second_avg_ntd']:,.0f} -> {_variant_verdict(v)}")
+  print("wrote variants_results.json")
+
+
+# =========================================================================
+# E. 2026-10-27 第二輪變體對照實驗（V6-V8，事前註冊，限波段）
+#    觸發：python weekly_backtest.py variants2
+#    絕不呼叫 send_tg_message；結果只印 stdout 並寫 variants_round2.json。
+#    共用口徑與上一輪完全一致：同一 harness、同一 60 天 15m 現貨代理窗口、
+#    同一費用（每口 50 元）、同一過關標準（平均正、RR ≥ 1.8、前後半皆正；
+#    n＜30 標註樣本不足）。本輪只跑波段：對鎖層不跑、當沖層不跑。
+#    波段純淨做法：hedge 欄位傳入永不觸發的 NEVER 訊號，使引擎不開對鎖單、
+#    不產生 hedge-triggered 平倉，波段交易即為純波段；既有 refactor／週報／
+#    V0-V5 路徑一律不動。
+# =========================================================================
+def _never_signal(row, prev, algo_id, param_val):
+  """永不觸發的訊號（第二輪波段純淨用）：對鎖欄位傳入此訊號後，
+  引擎永遠不開對鎖單、不產生 hedge-triggered 平倉。"""
+  return None
+
+
+_SIGNAL_FN["NEVER"] = _never_signal
+
+ROUND2_NO_HEDGE = ("NEVER", "無對鎖（本輪不跑）", 0)
+
+# V6：SRF 波段去 S1（S3-live／S2／S4，S1 移除後順位遞補）
+VARIANT_V6_SRF_NO_S1 = [
+    ("S3_LIVE", "S3-live 實盤等價條件", 78, "P1"),
+    ("MINERVINI_VCP_POCKET", "S2 Minervini VCP口袋支點", 80, "P2"),
+    ("UPGRADE_BB_W_BOTTOM", "S4 布林下軌W底雙確認", 24, "P3"),
+]
+# V7：SRF 波段去 S1＋S4（只留 S3-live／S2）
+VARIANT_V7_SRF_NO_S1_S4 = [
+    ("S3_LIVE", "S3-live 實盤等價條件", 78, "P1"),
+    ("MINERVINI_VCP_POCKET", "S2 Minervini VCP口袋支點", 80, "P2"),
+]
+# V8：優先序對調（全留，S2 → S3-live → S1 → S4）
+VARIANT_V8_SRF_S2_FIRST = [
+    ("MINERVINI_VCP_POCKET", "S2 Minervini VCP口袋支點", 80, "P1"),
+    ("S3_LIVE", "S3-live 實盤等價條件", 78, "P2"),
+    ("SNIPER_VWAP_PULLBACK", "S1 外資VWAP籌碼首回測確認", 38, "P3"),
+    ("UPGRADE_BB_W_BOTTOM", "S4 布林下軌W底雙確認", 24, "P4"),
+]
+
+
+def _round2_breakdown(trades, mid_i):
+  """逐策略拆解：筆數／勝數／平均／累計／前半／後半。"""
+  out = {}
+  by_strat = {}
+  for t in trades:
+    by_strat.setdefault(t["strategy"], []).append(t)
+  for strat, st in by_strat.items():
+    first = [x for x in st if x["entry_i"] < mid_i]
+    second = [x for x in st if x["entry_i"] >= mid_i]
+    out[strat] = {
+        "total": len(st),
+        "wins": sum(1 for x in st if x["pnl_ntd"] > 0),
+        "avg_ntd": round(sum(x["pnl_ntd"] for x in st) / len(st), 0) if st else 0.0,
+        "net_ntd": sum(x["pnl_ntd"] for x in st),
+        "first_n": len(first),
+        "first_avg": round(sum(x["pnl_ntd"] for x in first) / len(first), 0) if first else 0.0,
+        "second_n": len(second),
+        "second_avg": round(sum(x["pnl_ntd"] for x in second) / len(second), 0) if second else 0.0,
+    }
+  return out
+
+
+def run_variants_round2():
+  now_str = datetime.now(TW_TZ).strftime("%Y-%m-%d %H:%M")
+  df_0050 = prepare_master_df("0050.TW", "60d", "15m")
+  mid_i = len(df_0050) // 2
+  out = {"run_at": now_str,
+         "window": {"0050": [str(df_0050.index[0]), str(df_0050.index[-1]), len(df_0050)]},
+         "variants": {}}
+
+  def run_swing_only(order):
+    trades, censored = _refactor_run_asset(
+        df_0050, "SRF", order, ROUND2_NO_HEDGE, "new")
+    lt = [t for t in trades if t["layer"] == "swing"]
+    assert all(t["layer"] == "swing" for t in trades), "波段純淨檢查失敗：出現非 swing 交易"
+    s = _layer_stats(lt, mid_i)
+    s["censored"] = censored
+    return s, lt
+
+  for key, order in (("V6_SRF_swing_no_S1", VARIANT_V6_SRF_NO_S1),
+                     ("V7_SRF_swing_no_S1_S4", VARIANT_V7_SRF_NO_S1_S4),
+                     ("V8_SRF_swing_S2_first", VARIANT_V8_SRF_S2_FIRST)):
+    s, lt = run_swing_only(order)
+    out["variants"][key] = {k: v for k, v in s.items()}
+    out["variants"][key + "_trades"] = lt
+    out["variants"][key + "_breakdown"] = _round2_breakdown(lt, mid_i)
+
+  with open("variants_round2.json", "w", encoding="utf-8") as f:
+    json.dump(out, f, ensure_ascii=False, indent=2)
+  print("=== 2026-10-27 SRF variants round 2 (swing only, 60d 15m spot proxy) ===")
+  print(f"run_at: {now_str}")
+  print(f"window 0050: {out['window']['0050'][0]} -> {out['window']['0050'][1]} ({out['window']['0050'][2]} bars)")
+  for key in ("V6_SRF_swing_no_S1", "V7_SRF_swing_no_S1_S4", "V8_SRF_swing_S2_first"):
+    v = out["variants"][key]
+    print(f"{key}: n={v['total']} win={v['win_rate']}% avg={v['avg_ntd']:,.0f} RR={v['rr']} "
+          f"net={v['net_ntd']:+,} 1H={v['first_avg_ntd']:,.0f} 2H={v['second_avg_ntd']:,.0f} -> {_variant_verdict(v)}")
+    for strat, b in out["variants"][key + "_breakdown"].items():
+      print(f"    {strat}: n={b['total']} win={b['wins']} avg={b['avg_ntd']:,.0f} net={b['net_ntd']:+,} "
+            f"1H={b['first_n']}/{b['first_avg']:,.0f} 2H={b['second_n']}/{b['second_avg']:,.0f}")
+  print("wrote variants_round2.json")
+
+
 if __name__ == "__main__":
-  run_weekly_report()
+  import sys
+  if len(sys.argv) > 1 and sys.argv[1] == "refactor":
+    run_refactor_backtest()
+  elif len(sys.argv) > 1 and sys.argv[1] == "variants":
+    run_variants_backtest()
+  elif len(sys.argv) > 1 and sys.argv[1] == "variants2":
+    run_variants_round2()
+  else:
+    run_weekly_report()
