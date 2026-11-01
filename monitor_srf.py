@@ -35,9 +35,9 @@ STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "state.jso
 TG_BOT_TOKEN = (os.environ.get("TG_BOT_TOKEN") or "").strip()
 TG_CHAT_ID = (os.environ.get("TG_CHAT_ID") or "").strip()
 FORCE_REPORT = (os.environ.get("FORCE_REPORT") or "").strip().lower() == "true"
-# 即時觸價：TWSE 現股 MIS 輪詢（公開端點，免金鑰），只監控出場價位觸發。
-# 迴圈刻意短於 15 分鐘觸發間隔（12 分鐘），避免兩個迴圈同時寫 state。
-REALTIME_TOUCH = (os.environ.get("REALTIME_TOUCH", "1") or "1").strip() != "0"
+# 即時觸價（2026-11-01 使用者更正：SRF／QFF 觸價一律抓期貨價、走統一 API，
+# 不用現股 MIS；以下 MIS 迴圈預設關閉，僅留作備援，正式觸價由本機 unitrade 推播程式負責）。
+REALTIME_TOUCH = (os.environ.get("REALTIME_TOUCH", "0") or "0").strip() != "0"
 POLL_INTERVAL_SEC = int(os.environ.get("POLL_INTERVAL_SEC", "25"))
 TOUCH_LOOP_MINUTES = int(os.environ.get("TOUCH_LOOP_MINUTES", "12"))
 MIS_URL = ("https://mis.twse.com.tw/stock/api/getStockInfo.jsp"
