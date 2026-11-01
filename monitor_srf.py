@@ -15,6 +15,7 @@
 import bisect
 import json
 import os
+import time
 from datetime import datetime, timedelta
 
 import numpy as np
@@ -34,6 +35,86 @@ STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "state.jso
 TG_BOT_TOKEN = (os.environ.get("TG_BOT_TOKEN") or "").strip()
 TG_CHAT_ID = (os.environ.get("TG_CHAT_ID") or "").strip()
 FORCE_REPORT = (os.environ.get("FORCE_REPORT") or "").strip().lower() == "true"
+# 即時觸價：TWSE 現股 MIS 輪詢（公開端點，免金鑰），只監控出場價位觸發。
+# 迴圈刻意短於 15 分鐘觸發間隔（12 分鐘），避免兩個迴圈同時寫 state。
+REALTIME_TOUCH = (os.environ.get("REALTIME_TOUCH", "1") or "1").strip() != "0"
+POLL_INTERVAL_SEC = int(os.environ.get("POLL_INTERVAL_SEC", "25"))
+TOUCH_LOOP_MINUTES = int(os.environ.get("TOUCH_LOOP_MINUTES", "12"))
+MIS_URL = ("https://mis.twse.com.tw/stock/api/getStockInfo.jsp"
+           "?ex_ch=tse_0050.tw|tse_2330.tw&json=1&delay=0")
+SPOT_TICKER = {"SRF": "0050", "QFF": "2330"}
+
+
+def fetch_mis_spot():
+    """回傳 ({'0050': price, '2330': price}, date_str)；失敗回傳 (None, None)。
+    取 z（成交價）欄位；d 欄位為資料日期（YYYYMMDD），用來判斷是否為當日即時價。"""
+    try:
+        import requests
+        r = requests.get(MIS_URL, headers={
+            "User-Agent": "Mozilla/5.0",
+            "Referer": "https://mis.twse.com.tw/stock/fibest.jsp",
+        }, timeout=15)
+        data = r.json()
+        out = {}
+        date_str = None
+        for item in data.get("msgArray", []):
+            code = (item.get("c") or "").strip()
+            z = item.get("z")
+            if code and z not in (None, "", "-"):
+                try:
+                    out[code] = float(z)
+                except (TypeError, ValueError):
+                    pass
+            if item.get("d"):
+                date_str = item["d"]
+        if not out:
+            return None, None
+        return out, date_str
+    except Exception as e:
+        print(f"[MIS_ERROR] {e}")
+        return None, None
+
+
+def touch_check_position(asset, pos, live_price):
+    """即時觸價檢查。回傳 (new_pos, exit_event_or_None)。
+    只管價位觸發的出場：SHARED 的 SL／追蹤／鎖定／遠程、MA 的 SL。
+    對鎖與進場仍看收盤 bar（需要收盤價與指標確認），不在此處理。
+    出場價一律取觸到的水準（與回測口徑一致），不取即時價。"""
+    if pos is None:
+        return None, None
+    if pos["slot"] == "SHARED":
+        a = pos["atr"]
+        pos["peak"] = max(pos["peak"], live_price)
+        trail = pos["peak"] - 2.0 * a
+        level, reason = trail, "TRAIL"
+        if (not pos["locked"]) and live_price >= pos["entry"] + 3 * a:
+            pos["locked"] = True
+            pos["floor"] = pos["entry"] + 1 * a
+        if pos["locked"] and pos["floor"] >= trail:
+            level, reason = pos["floor"], "LOCK"
+        exit_price, reason_out = None, None
+        if live_price <= pos["sl"]:
+            exit_price, reason_out = pos["sl"], "SL"
+        elif live_price <= level:
+            exit_price, reason_out = level, reason
+        elif live_price >= pos["entry"] + 5 * a:
+            exit_price, reason_out = pos["entry"] + 5 * a, "CAP"
+        if exit_price is not None:
+            pnl = trade_pnl(asset, pos["entry"], exit_price, pos["lots"], "BUY")
+            return None, {"reason": reason_out, "exit": exit_price,
+                          "entry": pos["entry"], "lots": pos["lots"],
+                          "pnl": pnl, "strategy": pos["strategy"]}
+        return pos, None
+    # MA 槽：只看停損（交叉翻倉仍看收盤 bar）
+    sl = pos["sl"]
+    hit = (live_price <= sl) if pos["dir"] == "BUY" else (live_price >= sl)
+    if hit:
+        pnl = trade_pnl(asset, pos["entry"], sl, pos["lots"], pos["dir"])
+        return None, {"reason": "SL", "exit": sl,
+                      "entry": pos["entry"], "lots": pos["lots"],
+                      "pnl": pnl, "strategy": pos["strategy"],
+                      "dir": pos["dir"]}
+    return pos, None
 
 
 def send_tg_message(message):
@@ -424,6 +505,47 @@ def main():
     except Exception as e:
         print(f"[MA60_ERROR] {e}")
         tg_msgs.append(f"<b>新引擎 MA-60m 抓取／計算失敗</b>：{e}")
+
+    # ---- 即時觸價迴圈（TWSE 現股 MIS，25 秒輪詢，僅出場價位）----
+    # 只在台股交易時段跑；MIS 日期不是今天（假日／休市）就跳過，避免用舊價觸發。
+    # 迴圈 12 分鐘短於 15 分鐘觸發間隔，避免兩個迴圈同時寫 state。
+    if REALTIME_TOUCH and now.weekday() < 5:
+        hhmm = now.hour * 60 + now.minute
+        if 9 * 60 <= hhmm <= 13 * 60 + 35:
+            prices, mis_date = fetch_mis_spot()
+            today_str = now.strftime("%Y%m%d")
+            if prices is None or mis_date != today_str:
+                print(f"[TOUCH_SKIP] MIS 無法確認當日即時價（mis_date={mis_date}，today={today_str}）")
+            else:
+                n_iter = max(1, TOUCH_LOOP_MINUTES * 60 // POLL_INTERVAL_SEC)
+                print(f"[TOUCH_LOOP] 開始，{n_iter} 輪 × {POLL_INTERVAL_SEC} 秒")
+                for it in range(n_iter):
+                    if it > 0:
+                        prices, mis_date = fetch_mis_spot()
+                    if prices is None:
+                        time.sleep(POLL_INTERVAL_SEC)
+                        continue
+                    for slot in ("SRF_SHARED", "QFF_SHARED", "SRF_MA"):
+                        pos = positions.get(slot)
+                        if pos is None:
+                            continue
+                        asset = "SRF" if slot.startswith("SRF") else "QFF"
+                        live = prices.get(SPOT_TICKER[asset])
+                        if live is None:
+                            continue
+                        new_pos, ev = touch_check_position(asset, pos, live)
+                        positions[slot] = new_pos
+                        if ev is not None:
+                            book_exit(acct, ev["pnl"])
+                            direction = "多" if ev.get("dir", "BUY") == "BUY" else "空"
+                            msg = (f"<b>⚡即時觸價出場</b> {slot} {ev['reason']} "
+                                   f"{ev['entry']:.2f} ➔ {ev['exit']:.2f}（{ev['lots']} 口{direction}，"
+                                   f"損益 <b>{ev['pnl']:+d} 元</b>，現價 {live:.2f}）")
+                            print(msg)
+                            send_tg_message(msg)
+                    if it < n_iter - 1:
+                        time.sleep(POLL_INTERVAL_SEC)
+                print("[TOUCH_LOOP] 結束")
 
     save_state(state)
     for m in tg_msgs:
