@@ -1,17 +1,39 @@
 {
-  "account_version": "2026-11-01_SHARED_MA_V1",
-  "account": {
-    "initial_capital": 100000,
-    "realized_pnl": -1550,
-    "total_trades_count": 30,
-    "win_trades_count": 18,
-    "close_out_2026_11_01": {
-      "note": "舊15m引擎部位於2026-11-01結清，價格為舊state.json最後記錄之10-31盤中價（非即時價）；TP1已實現部分已含於舊已實現-3150，結清僅針對state.json剩餘部位；舊state完整保留於git歷史",
-      "SRF": {"dir": "BUY", "lots": 2, "entry": 101.75, "close": 102.3, "pnl": 1100, "old_strategy": "日夜盤籌碼順勢共振多"},
-      "QFF": {"dir": "BUY", "lots": 1, "entry": 2291.0, "close": 2296.0, "pnl": 500, "old_strategy": "布林下軌W底雙確認"}
-    }
-  },
-  "positions": {"SRF_SHARED": null, "QFF_SHARED": null, "SRF_MA": null},
-  "last_processed": {"daily_SRF": "2026-10-30", "daily_QFF": "2026-10-30", "ma60_bar": "2026-10-30 13:00"},
-  "engine": "SHARED-A daily (SRF+QFF) + MA-60m (SRF), spot proxy (yfinance), paper only"
+ "account_version": "2026-11-01_SHARED_MA_V1",
+ "account": {
+  "initial_capital": 100000,
+  "realized_pnl": -1550,
+  "total_trades_count": 30,
+  "win_trades_count": 18,
+  "close_out_2026_11_01": {
+   "note": "舊15m引擎部位於2026-11-01結清，價格為舊state.json最後記錄之10-31盤中價（非即時價）；TP1已實現部分已含於舊已實現-3150，結清僅針對state.json剩餘部位；舊state完整保留於git歷史",
+   "SRF": {
+    "dir": "BUY",
+    "lots": 2,
+    "entry": 101.75,
+    "close": 102.3,
+    "pnl": 1100,
+    "old_strategy": "日夜盤籌碼順勢共振多"
+   },
+   "QFF": {
+    "dir": "BUY",
+    "lots": 1,
+    "entry": 2291.0,
+    "close": 2296.0,
+    "pnl": 500,
+    "old_strategy": "布林下軌W底雙確認"
+   }
+  }
+ },
+ "positions": {
+  "SRF_SHARED": null,
+  "QFF_SHARED": null,
+  "SRF_MA": null
+ },
+ "last_processed": {
+  "daily_SRF": "2026-10-30",
+  "daily_QFF": "2026-10-30",
+  "ma60_bar": "2026-10-30 13:00"
+ },
+ "engine": "SHARED-A daily (SRF+QFF) + MA-60m (SRF), spot proxy (yfinance), paper only"
 }
