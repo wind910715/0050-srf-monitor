@@ -1,0 +1,23 @@
+name: New engine backtest
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  backtest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install yfinance pandas numpy requests pytz
+      - run: python3 new_engine_backtest.py
+        env:
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: new-engine-backtest-results
+          path: new_engine_backtest_results.json
