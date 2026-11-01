@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""0050 / 台積電新引擎（2026-11-01 切換）：SHARED-A 日線（SRF＋QFF）＋均線 60m（SRF 專用）。
+"""0050 / 台積電新引擎（2026-11-01 切換）：幹多（SHARED-A 日線，SRF＋QFF）＋金叉（均線 60m，SRF 專用）。
 現股代理（yfinance），紙上模擬，非真單。
 設計原則：
 - 冪等單次檢查：排程每 15 分鐘觸發一次，引擎只處理「新收盤的 bar」，無新 bar 即靜默退出。
@@ -36,14 +36,22 @@ TG_BOT_TOKEN = (os.environ.get("TG_BOT_TOKEN") or "").strip()
 TG_CHAT_ID = (os.environ.get("TG_CHAT_ID") or "").strip()
 FORCE_REPORT = (os.environ.get("FORCE_REPORT") or "").strip().lower() == "true"
 # ---- 推播顯示名（只改顯示，內部代號 RES／VWAP／VCP／W、MA-60m、state 格式全不動）----
+# 策略層 TG 名：SHARED-A→幹多、MA-60m→金叉；幹多內的訊號名（共振多／VWAP／VCP／W底）保留，
+# 以免四種進場方式在 TG 上無法區分。
+STRATEGY_DISPLAY = {"SHARED": "幹多", "MA-60m": "金叉"}
 SIGNAL_DISPLAY = {"RES": "共振多", "VWAP": "VWAP", "VCP": "VCP", "W": "W底"}
 REASON_DISPLAY = {"SL": "停損", "TRAIL": "追蹤停損", "LOCK": "鎖定出場",
                   "CAP": "遠程出場", "HEDGE": "對鎖出場", "CROSS": "交叉翻倉"}
 
 
 def signal_display(strategy):
-    """strategy 可能是進場事件的代號（RES）或部位存的 SHARED-RES，統一轉中文顯示名。"""
+    """strategy 可能是進場事件的代號（RES）或部位存的 SHARED-RES，統一轉 TG 顯示名。
+    SHARED 訊號一律帶策略名，例：SHARED-RES→幹多-共振多；MA-60m→金叉。"""
+    if (strategy or "") == "MA-60m":
+        return STRATEGY_DISPLAY["MA-60m"]
     code = (strategy or "").replace("SHARED-", "")
+    if (strategy or "").startswith("SHARED-"):
+        return f"{STRATEGY_DISPLAY['SHARED']}-{SIGNAL_DISPLAY.get(code, code)}"
     return SIGNAL_DISPLAY.get(code, code)
 
 
@@ -496,7 +504,7 @@ def main():
             positions[slot] = pos
     except Exception as e:
         print(f"[SHARED_ERROR] {e}")
-        tg_msgs.append(f"<b>新引擎 SHARED 日線抓取／計算失敗</b>：{e}")
+        tg_msgs.append(f"<b>新引擎 幹多 日線抓取／計算失敗</b>：{e}")
 
     # ---- MA-60m（SRF 專用）----
     try:
@@ -513,19 +521,19 @@ def main():
             for kind, det in events:
                 if kind == "ENTRY":
                     tg_msgs.append(
-                        f"SRF 均線60m 進場{dir_display(det['dir'])} "
+                        f"SRF 金叉 進場{dir_display(det['dir'])} "
                         f"{LOTS['SRF']}口 @{det['entry']:.2f} 停損{det['sl']:.2f}")
                 else:
                     book_exit(acct, det["pnl"])
                     tg_msgs.append(
-                        f"SRF 均線60m {pos_display(det['dir'])}出場 "
+                        f"SRF 金叉 {pos_display(det['dir'])}出場 "
                         f"{reason_display(det['reason'])} "
                         f"{det['entry']:.2f}→{det['exit']:.2f} 損益{det['pnl']:+d}")
             last["ma60_bar"] = bar_key
         positions["SRF_MA"] = pos
     except Exception as e:
         print(f"[MA60_ERROR] {e}")
-        tg_msgs.append(f"<b>新引擎 MA-60m 抓取／計算失敗</b>：{e}")
+        tg_msgs.append(f"<b>新引擎 金叉 抓取／計算失敗</b>：{e}")
 
     # ---- 即時觸價迴圈（TWSE 現股 MIS，25 秒輪詢，僅出場價位）----
     # 只在台股交易時段跑；MIS 日期不是今天（假日／休市）就跳過，避免用舊價觸發。
@@ -559,7 +567,7 @@ def main():
                         if ev is not None:
                             book_exit(acct, ev["pnl"])
                             if slot == "SRF_MA":
-                                label = f"SRF 均線60m {pos_display(ev['dir'])}"
+                                label = f"SRF 金叉 {pos_display(ev['dir'])}"
                             else:
                                 label = f"{asset} {signal_display(ev.get('strategy', ''))}"
                             msg = (f"⚡{label} 觸價出場 "
@@ -589,9 +597,9 @@ def main():
                     f"@{pos['entry']:.2f} 停損{pos['sl']:.2f}")
         summary = (
             f"<b>新引擎狀態（{now.strftime('%Y-%m-%d %H:%M')}）</b>\n"
-            f"{slot_line('SRF_SHARED', 'SRF', '共用')}\n"
-            f"{slot_line('QFF_SHARED', 'QFF', '共用')}\n"
-            f"{slot_line('SRF_MA', 'SRF', '均線60m')}\n"
+            f"{slot_line('SRF_SHARED', 'SRF', '幹多')}\n"
+            f"{slot_line('QFF_SHARED', 'QFF', '幹多')}\n"
+            f"{slot_line('SRF_MA', 'SRF', '金叉')}\n"
             f"已實現：{acct.get('realized_pnl')}")
         print(summary)
         send_tg_message(summary)
