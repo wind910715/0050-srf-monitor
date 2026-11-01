@@ -38,7 +38,13 @@ FORCE_REPORT = (os.environ.get("FORCE_REPORT") or "").strip().lower() == "true"
 # ---- 推播顯示名（只改顯示，內部代號 RES／VWAP／VCP／W、MA-60m、state 格式全不動）----
 # 策略層 TG 名：SHARED-A→幹多、MA-60m→金叉；幹多內的訊號名（共振多／VWAP／VCP／W底）保留，
 # 以免四種進場方式在 TG 上無法區分。
+# 資產層 TG 名：內部代號不動，推播一律寫小0050／小台積，不寫代號。
 STRATEGY_DISPLAY = {"SHARED": "幹多", "MA-60m": "金叉"}
+ASSET_DISPLAY = {"SRF": "小0050", "QFF": "小台積"}
+
+
+def asset_display(asset):
+    return ASSET_DISPLAY.get(asset, asset)
 SIGNAL_DISPLAY = {"RES": "共振多", "VWAP": "VWAP", "VCP": "VCP", "W": "W底"}
 REASON_DISPLAY = {"SL": "停損", "TRAIL": "追蹤停損", "LOCK": "鎖定出場",
                   "CAP": "遠程出場", "HEDGE": "對鎖出場", "CROSS": "交叉翻倉"}
@@ -492,12 +498,12 @@ def main():
                 for kind, det in events:
                     if kind == "ENTRY":
                         tg_msgs.append(
-                            f"{asset} {signal_display(det['strategy'])} 進場做多 "
+                            f"{asset_display(asset)} {signal_display(det['strategy'])} 進場做多 "
                             f"{LOTS[asset]}口 @{det['entry']:.2f} 停損{det['sl']:.2f}")
                     else:
                         book_exit(acct, det["pnl"])
                         tg_msgs.append(
-                            f"{asset} {signal_display(det['strategy'])} 出場 "
+                            f"{asset_display(asset)} {signal_display(det['strategy'])} 出場 "
                             f"{reason_display(det['reason'])} "
                             f"{det['entry']:.2f}→{det['exit']:.2f} 損益{det['pnl']:+d}")
                 last[last_key] = bar_str
@@ -521,12 +527,12 @@ def main():
             for kind, det in events:
                 if kind == "ENTRY":
                     tg_msgs.append(
-                        f"SRF 金叉 進場{dir_display(det['dir'])} "
+                        f"{asset_display('SRF')} 金叉 進場{dir_display(det['dir'])} "
                         f"{LOTS['SRF']}口 @{det['entry']:.2f} 停損{det['sl']:.2f}")
                 else:
                     book_exit(acct, det["pnl"])
                     tg_msgs.append(
-                        f"SRF 金叉 {pos_display(det['dir'])}出場 "
+                        f"{asset_display('SRF')} 金叉 {pos_display(det['dir'])}出場 "
                         f"{reason_display(det['reason'])} "
                         f"{det['entry']:.2f}→{det['exit']:.2f} 損益{det['pnl']:+d}")
             last["ma60_bar"] = bar_key
@@ -567,9 +573,9 @@ def main():
                         if ev is not None:
                             book_exit(acct, ev["pnl"])
                             if slot == "SRF_MA":
-                                label = f"SRF 金叉 {pos_display(ev['dir'])}"
+                                label = f"{asset_display(asset)} 金叉 {pos_display(ev['dir'])}"
                             else:
-                                label = f"{asset} {signal_display(ev.get('strategy', ''))}"
+                                label = f"{asset_display(asset)} {signal_display(ev.get('strategy', ''))}"
                             msg = (f"⚡{label} 觸價出場 "
                                    f"{reason_display(ev['reason'])} "
                                    f"{ev['entry']:.2f}→{ev['exit']:.2f} 損益{ev['pnl']:+d} "
@@ -589,11 +595,11 @@ def main():
         def slot_line(slot, asset, label):
             pos = positions.get(slot)
             if pos is None:
-                return f"{asset} {label}：無部位"
+                return f"{asset_display(asset)} {label}：無部位"
             if slot == "SRF_MA":
-                return (f"{asset} {label}：{pos_display(pos['dir'])} {pos['lots']}口 "
+                return (f"{asset_display(asset)} {label}：{pos_display(pos['dir'])} {pos['lots']}口 "
                         f"@{pos['entry']:.2f} 停損{pos['sl']:.2f}")
-            return (f"{asset} {signal_display(pos.get('strategy', ''))}：多單 {pos['lots']}口 "
+            return (f"{asset_display(asset)} {signal_display(pos.get('strategy', ''))}：多單 {pos['lots']}口 "
                     f"@{pos['entry']:.2f} 停損{pos['sl']:.2f}")
         summary = (
             f"<b>新引擎狀態（{now.strftime('%Y-%m-%d %H:%M')}）</b>\n"
