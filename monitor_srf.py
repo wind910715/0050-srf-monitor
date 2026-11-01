@@ -35,6 +35,28 @@ STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "state.jso
 TG_BOT_TOKEN = (os.environ.get("TG_BOT_TOKEN") or "").strip()
 TG_CHAT_ID = (os.environ.get("TG_CHAT_ID") or "").strip()
 FORCE_REPORT = (os.environ.get("FORCE_REPORT") or "").strip().lower() == "true"
+# ---- 推播顯示名（只改顯示，內部代號 RES／VWAP／VCP／W、MA-60m、state 格式全不動）----
+SIGNAL_DISPLAY = {"RES": "共振多", "VWAP": "VWAP", "VCP": "VCP", "W": "W底"}
+REASON_DISPLAY = {"SL": "停損", "TRAIL": "追蹤停損", "LOCK": "鎖定出場",
+                  "CAP": "遠程出場", "HEDGE": "對鎖出場", "CROSS": "交叉翻倉"}
+
+
+def signal_display(strategy):
+    """strategy 可能是進場事件的代號（RES）或部位存的 SHARED-RES，統一轉中文顯示名。"""
+    code = (strategy or "").replace("SHARED-", "")
+    return SIGNAL_DISPLAY.get(code, code)
+
+
+def reason_display(reason):
+    return REASON_DISPLAY.get(reason, reason)
+
+
+def dir_display(direction):
+    return "做多" if direction == "BUY" else "做空"
+
+
+def pos_display(direction):
+    return "多單" if direction == "BUY" else "空單"
 # 即時觸價（2026-11-01 使用者更正：SRF／QFF 觸價一律抓期貨價、走統一 API，
 # 不用現股 MIS；以下 MIS 迴圈預設關閉，僅留作備援，正式觸價由本機 unitrade 推播程式負責）。
 REALTIME_TOUCH = (os.environ.get("REALTIME_TOUCH", "0") or "0").strip() != "0"
@@ -462,15 +484,14 @@ def main():
                 for kind, det in events:
                     if kind == "ENTRY":
                         tg_msgs.append(
-                            f"<b>{asset} SHARED-{det['strategy']} 進場</b> "
-                            f"做多 {LOTS[asset]} 口 @ {det['entry']:.2f}，"
-                            f"停損 {det['sl']:.2f}（{bar_str} 收盤訊號）")
+                            f"{asset} {signal_display(det['strategy'])} 進場做多 "
+                            f"{LOTS[asset]}口 @{det['entry']:.2f} 停損{det['sl']:.2f}")
                     else:
                         book_exit(acct, det["pnl"])
                         tg_msgs.append(
-                            f"<b>{asset} {det['strategy']} 出場</b> {det['reason']} "
-                            f"{det['entry']:.2f} ➔ {det['exit']:.2f}（{det['lots']} 口，"
-                            f"損益 <b>{det['pnl']:+d} 元</b>，{bar_str}）")
+                            f"{asset} {signal_display(det['strategy'])} 出場 "
+                            f"{reason_display(det['reason'])} "
+                            f"{det['entry']:.2f}→{det['exit']:.2f} 損益{det['pnl']:+d}")
                 last[last_key] = bar_str
             positions[slot] = pos
     except Exception as e:
@@ -492,14 +513,14 @@ def main():
             for kind, det in events:
                 if kind == "ENTRY":
                     tg_msgs.append(
-                        f"<b>SRF MA-60m 進場</b> {det['dir']} {LOTS['SRF']} 口 @ {det['entry']:.2f}，"
-                        f"停損 {det['sl']:.2f}（{bar_key}）")
+                        f"SRF 均線60m 進場{dir_display(det['dir'])} "
+                        f"{LOTS['SRF']}口 @{det['entry']:.2f} 停損{det['sl']:.2f}")
                 else:
                     book_exit(acct, det["pnl"])
                     tg_msgs.append(
-                        f"<b>SRF MA-60m 出場</b> {det['reason']} "
-                        f"{det['entry']:.2f} ➔ {det['exit']:.2f}（{det['lots']} 口，"
-                        f"損益 <b>{det['pnl']:+d} 元</b>，{bar_key}）")
+                        f"SRF 均線60m {pos_display(det['dir'])}出場 "
+                        f"{reason_display(det['reason'])} "
+                        f"{det['entry']:.2f}→{det['exit']:.2f} 損益{det['pnl']:+d}")
             last["ma60_bar"] = bar_key
         positions["SRF_MA"] = pos
     except Exception as e:
@@ -537,10 +558,14 @@ def main():
                         positions[slot] = new_pos
                         if ev is not None:
                             book_exit(acct, ev["pnl"])
-                            direction = "多" if ev.get("dir", "BUY") == "BUY" else "空"
-                            msg = (f"<b>⚡即時觸價出場</b> {slot} {ev['reason']} "
-                                   f"{ev['entry']:.2f} ➔ {ev['exit']:.2f}（{ev['lots']} 口{direction}，"
-                                   f"損益 <b>{ev['pnl']:+d} 元</b>，現價 {live:.2f}）")
+                            if slot == "SRF_MA":
+                                label = f"SRF 均線60m {pos_display(ev['dir'])}"
+                            else:
+                                label = f"{asset} {signal_display(ev.get('strategy', ''))}"
+                            msg = (f"⚡{label} 觸價出場 "
+                                   f"{reason_display(ev['reason'])} "
+                                   f"{ev['entry']:.2f}→{ev['exit']:.2f} 損益{ev['pnl']:+d} "
+                                   f"（現價 {live:.2f}）")
                             print(msg)
                             send_tg_message(msg)
                     if it < n_iter - 1:
@@ -553,11 +578,20 @@ def main():
     if tg_msgs:
         send_tg_message("\n\n".join(tg_msgs))
     elif FORCE_REPORT:
+        def slot_line(slot, asset, label):
+            pos = positions.get(slot)
+            if pos is None:
+                return f"{asset} {label}：無部位"
+            if slot == "SRF_MA":
+                return (f"{asset} {label}：{pos_display(pos['dir'])} {pos['lots']}口 "
+                        f"@{pos['entry']:.2f} 停損{pos['sl']:.2f}")
+            return (f"{asset} {signal_display(pos.get('strategy', ''))}：多單 {pos['lots']}口 "
+                    f"@{pos['entry']:.2f} 停損{pos['sl']:.2f}")
         summary = (
             f"<b>新引擎狀態（{now.strftime('%Y-%m-%d %H:%M')}）</b>\n"
-            f"SRF_SHARED：{positions.get('SRF_SHARED')}\n"
-            f"QFF_SHARED：{positions.get('QFF_SHARED')}\n"
-            f"SRF_MA：{positions.get('SRF_MA')}\n"
+            f"{slot_line('SRF_SHARED', 'SRF', '共用')}\n"
+            f"{slot_line('QFF_SHARED', 'QFF', '共用')}\n"
+            f"{slot_line('SRF_MA', 'SRF', '均線60m')}\n"
             f"已實現：{acct.get('realized_pnl')}")
         print(summary)
         send_tg_message(summary)
