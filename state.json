@@ -2,9 +2,9 @@
  "account_version": "2026-11-01_SHARED_MA_V1",
  "account": {
   "initial_capital": 100000,
-  "realized_pnl": -1550,
-  "total_trades_count": 30,
-  "win_trades_count": 18,
+  "realized_pnl": 0,
+  "total_trades_count": 0,
+  "win_trades_count": 0,
   "close_out_2026_11_01": {
    "note": "舊15m引擎部位於2026-11-01結清，價格為舊state.json最後記錄之10-31盤中價（非即時價）；TP1已實現部分已含於舊已實現-3150，結清僅針對state.json剩餘部位；舊state完整保留於git歷史",
    "SRF": {
