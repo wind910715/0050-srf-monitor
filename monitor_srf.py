@@ -9,7 +9,7 @@
 - SHARED-A：只做多、單一倉位、出場當根不重進、出場統一 v1。
 - MA-60m：MA5/MA20 翻倉（多空都做）、停損 1.0xATR、停損判定優先於交叉（與回測 run_ma 一致，
   停損出場後若同根有交叉，依回測邏輯同根重進）。
-- TG 只在進場／出場事件與手動強制回報時發送，不發心跳。
+- TG 只在策略觸發事件（進場／出場／觸價出場）時發送；狀態摘要永不自動推播，只由使用者查詢時回覆（2026-11-02 使用者定）。
 - 出場損益即時結算進帳戶（realized_pnl、總筆數、勝筆數）。
 """
 import bisect
@@ -608,7 +608,9 @@ def main():
             f"{slot_line('SRF_MA', 'SRF', '金叉死叉')}\n"
             f"已實現：{acct.get('realized_pnl')}")
         print(summary)
-        send_tg_message(summary)
+        # 2026-11-02 使用者定：狀態摘要永不自動推播（含手動強制回報），
+        # 只印在 log 供查閱；狀態只由使用者特別查詢（TG 查詢程式）時回覆。
+        # 因此這裡刻意不呼叫 send_tg_message。
     else:
         print("[NO_NEW_EVENTS]")
 
