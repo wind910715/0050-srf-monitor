@@ -31,9 +31,9 @@
   "SRF_MA": null
  },
  "last_processed": {
-  "daily_SRF": "2026-11-05",
-  "daily_QFF": "2026-11-05",
-  "ma60_bar": "2026-11-06 12:00"
+  "daily_SRF": "2026-11-06",
+  "daily_QFF": "2026-11-06",
+  "ma60_bar": "2026-11-06 13:00"
  },
  "engine": "SHARED-A daily (SRF+QFF) + MA-60m (SRF), spot proxy (yfinance), paper only"
 }
