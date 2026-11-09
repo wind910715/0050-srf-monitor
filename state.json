@@ -1,202 +1,202 @@
 {
-  "account_version": "2026-11-01_SHARED_MA_V1",
-  "account": {
-    "initial_capital": 100000,
-    "realized_pnl": 0,
-    "total_trades_count": 0,
-    "win_trades_count": 0,
-    "close_out_2026_11_01": {
-      "note": "舊15m引擎部位於2026-11-01結清，價格為舊state.json最後記錄之10-31盤中價（非即時價）；TP1已實現部分已含於舊已實現-3150，結清僅針對state.json剩餘部位；舊state完整保留於git歷史",
-      "SRF": {
-        "dir": "BUY",
-        "lots": 2,
-        "entry": 101.75,
-        "close": 102.3,
-        "pnl": 1100,
-        "old_strategy": "日夜盤籌碼順勢共振多"
-      },
-      "QFF": {
-        "dir": "BUY",
-        "lots": 1,
-        "entry": 2291.0,
-        "close": 2296.0,
-        "pnl": 500,
-        "old_strategy": "布林下軌W底雙確認"
-      }
-    }
-  },
-  "positions": {
-    "SRF_SHARED": null,
-    "QFF_SHARED": null,
-    "SRF_MA": null
-  },
-  "last_processed": {
-    "daily_SRF": "2026-11-06",
-    "daily_QFF": "2026-11-06",
-    "ma60_bar": "2026-11-06 13:00"
-  },
-  "engine": "SHARED-A daily (SRF+QFF) + MA-60m (SRF), spot proxy (yfinance), paper only",
-  "optimized_params": {
-    "updated_at": "2026-11-07 09:46",
-    "SRF_S4": {
-      "algo_id": "UPGRADE_BB_W_BOTTOM",
-      "algo_label": "布林下軌W底雙確認",
-      "total": 30,
-      "wins": 15,
-      "win_rate": 50.0,
-      "rr": 1.02,
-      "net_pts": 0.15,
-      "censored": 0,
-      "sample_ok": true,
-      "score": 0.15001525878908417,
-      "enabled": true,
-      "params": {
-        "param_val": 18,
-        "sl_mult": 1.25,
-        "tp1_mult": 1.05,
-        "tp2_mult": 3.5,
-        "asset": "SRF"
-      }
-    },
-    "SRF_S1": {
-      "algo_id": "SNIPER_VWAP_PULLBACK",
-      "algo_label": "外資VWAP籌碼首回測確認",
-      "total": 7,
-      "wins": 2,
-      "win_rate": 28.6,
-      "rr": 2.64,
-      "net_pts": 0.15,
-      "censored": 0,
-      "sample_ok": false,
-      "score": 0.1499999999999999,
-      "enabled": true,
-      "params": {
-        "param_val": 45,
-        "sl_mult": 1.25,
-        "tp1_mult": 1.05,
-        "tp2_mult": 3.5,
-        "asset": "SRF"
-      }
-    },
-    "SRF_S2": {
-      "algo_id": "MINERVINI_VCP_POCKET",
-      "algo_label": "Minervini VCP口袋支點",
-      "total": 7,
-      "wins": 4,
-      "win_rate": 57.1,
-      "rr": 1.67,
-      "net_pts": 2.44,
-      "censored": 1,
-      "sample_ok": false,
-      "score": 2.4400000000000057,
-      "enabled": true,
-      "params": {
-        "param_val": 72,
-        "sl_mult": 1.25,
-        "tp1_mult": 1.05,
-        "tp2_mult": 3.5,
-        "asset": "SRF"
-      }
-    },
-    "SRF_S3": {
-      "algo_id": "SNIPER_CHIP_MOMENTUM",
-      "algo_label": "日夜盤籌碼順勢共振多",
-      "total": 5,
-      "wins": 2,
-      "win_rate": 40.0,
-      "rr": 2.18,
-      "net_pts": 0.9,
-      "censored": 0,
-      "sample_ok": false,
-      "score": 0.9000000000000055,
-      "enabled": true,
-      "params": {
-        "param_val": 72,
-        "sl_mult": 1.25,
-        "tp1_mult": 1.05,
-        "tp2_mult": 3.5,
-        "asset": "SRF"
-      }
-    },
-    "SRF_HEDGE": {
-      "algo_id": "HYBRID_EXHAUST_HEDGE",
-      "algo_label": "極限乖離衰竭+破籌碼對鎖",
-      "total": 34,
-      "wins": 24,
-      "win_rate": 70.6,
-      "rr": 1.34,
-      "net_pts": 12.52,
-      "censored": 0,
-      "sample_ok": true,
-      "score": 12.519998474121092,
-      "enabled": true,
-      "params": {
-        "param_val": 82,
-        "sl_mult": 1.25,
-        "tp1_mult": 1.05,
-        "tp2_mult": 3.5,
-        "asset": "SRF"
-      }
-    },
-    "QFF_T1": {
-      "algo_id": "UPGRADE_RSI2_SWING",
-      "algo_label": "Connors RSI(2)極限收腳確認",
-      "total": 22,
-      "wins": 11,
-      "win_rate": 50.0,
-      "rr": 0.7,
-      "net_pts": -67.0,
-      "censored": 0,
-      "sample_ok": false,
-      "score": -67.0,
-      "enabled": true,
-      "params": {
-        "param_val": 22,
-        "sl_mult": 1.25,
-        "tp1_mult": 1.05,
-        "tp2_mult": 3.5,
-        "asset": "QFF"
-      }
-    },
-    "QFF_T2": {
-      "algo_id": "SNIPER_CHIP_MOMENTUM",
-      "algo_label": "日夜盤籌碼順勢共振多",
-      "total": 3,
-      "wins": 2,
-      "win_rate": 66.7,
-      "rr": 1.46,
-      "net_pts": 39.5,
-      "censored": 0,
-      "sample_ok": false,
-      "score": 39.5,
-      "enabled": true,
-      "params": {
-        "param_val": 55,
-        "sl_mult": 1.25,
-        "tp1_mult": 1.05,
-        "tp2_mult": 3.5,
-        "asset": "QFF"
-      }
-    },
-    "QFF_HEDGE": {
-      "algo_id": "UPGRADE_TSMC_CLIMAX_HEDGE",
-      "algo_label": "高檔極限衰竭+初破籌碼對鎖",
-      "total": 29,
-      "wins": 16,
-      "win_rate": 55.2,
-      "rr": 1.0,
-      "net_pts": 60.5,
-      "censored": 1,
-      "sample_ok": false,
-      "score": 60.5,
-      "enabled": true,
-      "params": {
-        "param_val": 82,
-        "sl_mult": 1.25,
-        "tp1_mult": 1.05,
-        "tp2_mult": 3.5,
-        "asset": "QFF"
-      }
-    }
+ "account_version": "2026-11-01_SHARED_MA_V1",
+ "account": {
+  "initial_capital": 100000,
+  "realized_pnl": 0,
+  "total_trades_count": 0,
+  "win_trades_count": 0,
+  "close_out_2026_11_01": {
+   "note": "舊15m引擎部位於2026-11-01結清，價格為舊state.json最後記錄之10-31盤中價（非即時價）；TP1已實現部分已含於舊已實現-3150，結清僅針對state.json剩餘部位；舊state完整保留於git歷史",
+   "SRF": {
+    "dir": "BUY",
+    "lots": 2,
+    "entry": 101.75,
+    "close": 102.3,
+    "pnl": 1100,
+    "old_strategy": "日夜盤籌碼順勢共振多"
+   },
+   "QFF": {
+    "dir": "BUY",
+    "lots": 1,
+    "entry": 2291.0,
+    "close": 2296.0,
+    "pnl": 500,
+    "old_strategy": "布林下軌W底雙確認"
+   }
   }
+ },
+ "positions": {
+  "SRF_SHARED": null,
+  "QFF_SHARED": null,
+  "SRF_MA": null
+ },
+ "last_processed": {
+  "daily_SRF": "2026-11-06",
+  "daily_QFF": "2026-11-06",
+  "ma60_bar": "2026-11-06 13:00"
+ },
+ "engine": "SHARED-A daily (SRF+QFF) + MA-60m (SRF), spot proxy (yfinance), paper only",
+ "optimized_params": {
+  "updated_at": "2026-11-07 09:46",
+  "SRF_S4": {
+   "algo_id": "UPGRADE_BB_W_BOTTOM",
+   "algo_label": "布林下軌W底雙確認",
+   "total": 30,
+   "wins": 15,
+   "win_rate": 50.0,
+   "rr": 1.02,
+   "net_pts": 0.15,
+   "censored": 0,
+   "sample_ok": true,
+   "score": 0.15001525878908417,
+   "enabled": true,
+   "params": {
+    "param_val": 18,
+    "sl_mult": 1.25,
+    "tp1_mult": 1.05,
+    "tp2_mult": 3.5,
+    "asset": "SRF"
+   }
+  },
+  "SRF_S1": {
+   "algo_id": "SNIPER_VWAP_PULLBACK",
+   "algo_label": "外資VWAP籌碼首回測確認",
+   "total": 7,
+   "wins": 2,
+   "win_rate": 28.6,
+   "rr": 2.64,
+   "net_pts": 0.15,
+   "censored": 0,
+   "sample_ok": false,
+   "score": 0.1499999999999999,
+   "enabled": true,
+   "params": {
+    "param_val": 45,
+    "sl_mult": 1.25,
+    "tp1_mult": 1.05,
+    "tp2_mult": 3.5,
+    "asset": "SRF"
+   }
+  },
+  "SRF_S2": {
+   "algo_id": "MINERVINI_VCP_POCKET",
+   "algo_label": "Minervini VCP口袋支點",
+   "total": 7,
+   "wins": 4,
+   "win_rate": 57.1,
+   "rr": 1.67,
+   "net_pts": 2.44,
+   "censored": 1,
+   "sample_ok": false,
+   "score": 2.4400000000000057,
+   "enabled": true,
+   "params": {
+    "param_val": 72,
+    "sl_mult": 1.25,
+    "tp1_mult": 1.05,
+    "tp2_mult": 3.5,
+    "asset": "SRF"
+   }
+  },
+  "SRF_S3": {
+   "algo_id": "SNIPER_CHIP_MOMENTUM",
+   "algo_label": "日夜盤籌碼順勢共振多",
+   "total": 5,
+   "wins": 2,
+   "win_rate": 40.0,
+   "rr": 2.18,
+   "net_pts": 0.9,
+   "censored": 0,
+   "sample_ok": false,
+   "score": 0.9000000000000055,
+   "enabled": true,
+   "params": {
+    "param_val": 72,
+    "sl_mult": 1.25,
+    "tp1_mult": 1.05,
+    "tp2_mult": 3.5,
+    "asset": "SRF"
+   }
+  },
+  "SRF_HEDGE": {
+   "algo_id": "HYBRID_EXHAUST_HEDGE",
+   "algo_label": "極限乖離衰竭+破籌碼對鎖",
+   "total": 34,
+   "wins": 24,
+   "win_rate": 70.6,
+   "rr": 1.34,
+   "net_pts": 12.52,
+   "censored": 0,
+   "sample_ok": true,
+   "score": 12.519998474121092,
+   "enabled": true,
+   "params": {
+    "param_val": 82,
+    "sl_mult": 1.25,
+    "tp1_mult": 1.05,
+    "tp2_mult": 3.5,
+    "asset": "SRF"
+   }
+  },
+  "QFF_T1": {
+   "algo_id": "UPGRADE_RSI2_SWING",
+   "algo_label": "Connors RSI(2)極限收腳確認",
+   "total": 22,
+   "wins": 11,
+   "win_rate": 50.0,
+   "rr": 0.7,
+   "net_pts": -67.0,
+   "censored": 0,
+   "sample_ok": false,
+   "score": -67.0,
+   "enabled": true,
+   "params": {
+    "param_val": 22,
+    "sl_mult": 1.25,
+    "tp1_mult": 1.05,
+    "tp2_mult": 3.5,
+    "asset": "QFF"
+   }
+  },
+  "QFF_T2": {
+   "algo_id": "SNIPER_CHIP_MOMENTUM",
+   "algo_label": "日夜盤籌碼順勢共振多",
+   "total": 3,
+   "wins": 2,
+   "win_rate": 66.7,
+   "rr": 1.46,
+   "net_pts": 39.5,
+   "censored": 0,
+   "sample_ok": false,
+   "score": 39.5,
+   "enabled": true,
+   "params": {
+    "param_val": 55,
+    "sl_mult": 1.25,
+    "tp1_mult": 1.05,
+    "tp2_mult": 3.5,
+    "asset": "QFF"
+   }
+  },
+  "QFF_HEDGE": {
+   "algo_id": "UPGRADE_TSMC_CLIMAX_HEDGE",
+   "algo_label": "高檔極限衰竭+初破籌碼對鎖",
+   "total": 29,
+   "wins": 16,
+   "win_rate": 55.2,
+   "rr": 1.0,
+   "net_pts": 60.5,
+   "censored": 1,
+   "sample_ok": false,
+   "score": 60.5,
+   "enabled": true,
+   "params": {
+    "param_val": 82,
+    "sl_mult": 1.25,
+    "tp1_mult": 1.05,
+    "tp2_mult": 3.5,
+    "asset": "QFF"
+   }
+  }
+ }
 }
